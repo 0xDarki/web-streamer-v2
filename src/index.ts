@@ -465,6 +465,57 @@ class WebStreamer {
               foundSelector = '[aria-label*="Play"]';
               elementFound = true;
             } else {
+              // Check if there's a "Pause" button (audio is already playing)
+              console.log('No "Play" button found. Checking if audio is already playing (looking for "Pause" button)...');
+              const pauseElements = await this.page.$$eval('[aria-label*="Pause"], [aria-label*="pause"], [aria-label*="PAUSE"]', (elements) => {
+                return elements.map((el, i) => ({
+                  index: i,
+                  ariaLabel: el.getAttribute('aria-label'),
+                  tagName: el.tagName,
+                  id: el.id,
+                  className: el.className,
+                  textContent: (el as any).textContent?.substring(0, 50) || ''
+                }));
+              });
+              
+              if (pauseElements.length > 0) {
+                console.log(`Found ${pauseElements.length} "Pause" button(s) - audio is already playing!`);
+                pauseElements.forEach((el: any) => {
+                  console.log(`  - ${el.tagName}${el.id ? '#' + el.id : ''}${el.className ? '.' + el.className.split(' ')[0] : ''} (aria-label: "${el.ariaLabel}")`);
+                });
+                
+                // Click pause then play to force audio restart and sink input creation
+                console.log('Clicking Pause then Play to force audio sink creation...');
+                foundSelector = '[aria-label*="Pause"]';
+                elementFound = true;
+                
+                // We'll click pause first, then wait and click play
+                try {
+                  await this.page.click('[aria-label*="Pause"]');
+                  console.log('✓ Clicked Pause');
+                  await new Promise((resolve) => setTimeout(resolve, 1500));
+                  
+                  // Now look for Play button
+                  const playAfterPause = await this.page.$$eval('[aria-label*="Play"], [aria-label*="play"]', (elements) => {
+                    return elements.length > 0;
+                  });
+                  
+                  if (playAfterPause) {
+                    await this.page.click('[aria-label*="Play"]');
+                    console.log('✓ Clicked Play after Pause - audio should restart and create sink input');
+                    foundSelector = '[aria-label*="Play"]';
+                    // Wait a bit for audio to start and create sink input
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                  } else {
+                    console.warn('Play button not found after clicking Pause');
+                  }
+                } catch (e) {
+                  console.warn('Could not click Pause/Play sequence:', e);
+                }
+              }
+            }
+            
+            if (!elementFound) {
               // Try to find ALL elements with aria-label to see what's available
               console.log('No elements with "Play" found. Searching for all elements with aria-label...');
               const allAriaElements = await this.page.$$eval('[aria-label]', (elements) => {
