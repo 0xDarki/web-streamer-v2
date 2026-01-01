@@ -127,8 +127,10 @@ class WebStreamer {
       browserArgs.push('--display=:' + this.displayNumber);
     }
 
+    // When using virtual display, we need headless: false so browser renders to X display
+    // FFmpeg will capture from the virtual display
     this.browser = await puppeteer.launch({
-      headless: useVirtualDisplay ? true : false,
+      headless: false,
       args: browserArgs,
     });
 
@@ -163,6 +165,9 @@ class WebStreamer {
     if (clickSelector || (clickX !== undefined && clickY !== undefined)) {
       await this.performClick(clickSelector, clickX, clickY, clickDelay);
     }
+
+    // Additional wait to ensure page is fully rendered before capturing
+    await new Promise((resolve) => setTimeout(resolve, 2000));
 
     // Start FFmpeg streaming
     await this.startFFmpegStream(rtmpsUrl, finalWidth, finalHeight, finalFps, audioDevice, videoDevice, useVirtualDisplay, lightweight);
