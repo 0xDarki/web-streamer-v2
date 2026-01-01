@@ -123,7 +123,7 @@ class WebStreamer {
     }
 
     this.browser = await puppeteer.launch({
-      headless: useVirtualDisplay ? 'new' : false,
+      headless: useVirtualDisplay ? true : false,
       args: browserArgs,
     });
 
@@ -351,19 +351,23 @@ class WebStreamer {
       // Spawn FFmpeg process
       this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-      this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
-        console.log(`FFmpeg stdout: ${data.toString()}`);
-      });
+      if (this.ffmpegProcess.stdout) {
+        this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
+          console.log(`FFmpeg stdout: ${data.toString()}`);
+        });
+      }
 
-      this.ffmpegProcess.stderr.on('data', (data: Buffer) => {
-        const output = data.toString();
-        // FFmpeg outputs to stderr by default
-        if (output.includes('error') || output.includes('Error')) {
-          console.error(`FFmpeg error: ${output}`);
-        } else {
-          console.log(`FFmpeg: ${output}`);
-        }
-      });
+      if (this.ffmpegProcess.stderr) {
+        this.ffmpegProcess.stderr.on('data', (data: Buffer) => {
+          const output = data.toString();
+          // FFmpeg outputs to stderr by default
+          if (output.includes('error') || output.includes('Error')) {
+            console.error(`FFmpeg error: ${output}`);
+          } else {
+            console.log(`FFmpeg: ${output}`);
+          }
+        });
+      }
 
       this.ffmpegProcess.on('close', (code: number) => {
         console.log(`FFmpeg process exited with code ${code}`);
