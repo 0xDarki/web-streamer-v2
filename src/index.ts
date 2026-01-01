@@ -414,34 +414,94 @@ class WebStreamer {
         const timeout = lightweight ? 30000 : 10000;
         console.log(`Waiting for selector (timeout: ${timeout}ms)...`);
         
-        // Try multiple methods to find the element
-        try {
-          await this.page.waitForSelector(selector, { timeout, visible: true });
-        } catch (e) {
-          // If visible fails, try without visible requirement
-          console.log('Element not visible, trying without visibility requirement...');
-          await this.page.waitForSelector(selector, { timeout: timeout / 2 });
-        }
+        // Try multiple selector variations
+        const selectorVariations = [
+          selector,
+          selector.replace(/'/g, '"'), // Try with double quotes
+          selector.replace(/"/g, "'"), // Try with single quotes
+          selector.replace(/\[aria-label=['"]Play['"]\]/, '[aria-label="Play"]'), // Normalize quotes
+          selector.replace(/\[aria-label=['"]Play['"]\]/, "[aria-label='Play']"), // Normalize quotes
+        ];
         
-        // Try to click, with retry
-        let clicked = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        let elementFound = false;
+        let foundSelector = selector;
+        
+        for (const sel of selectorVariations) {
           try {
-            await this.page.click(selector);
-            clicked = true;
+            console.log(`Trying selector variation: ${sel}`);
+            await this.page.waitForSelector(sel, { timeout: timeout / selectorVariations.length, visible: false });
+            foundSelector = sel;
+            elementFound = true;
+            console.log(`✓ Found element with selector: ${sel}`);
             break;
           } catch (e) {
-            if (attempt < 2) {
-              console.log(`Click attempt ${attempt + 1} failed, retrying...`);
-              await new Promise((resolve) => setTimeout(resolve, 1000));
-            } else {
-              throw e;
-            }
+            // Try next variation
+            continue;
           }
         }
         
-        if (clicked) {
-          console.log('Click performed successfully');
+        if (!elementFound) {
+          // Last attempt: try to find any element with aria-label containing "Play"
+          try {
+            console.log('Trying to find any element with aria-label containing "Play"...');
+            const playElements = await this.page.$$eval('[aria-label*="Play"], [aria-label*="play"]', (elements) => {
+              return elements.map((el, i) => ({
+                index: i,
+                ariaLabel: el.getAttribute('aria-label'),
+                tagName: el.tagName,
+                id: el.id,
+                className: el.className
+              }));
+            });
+            
+            if (playElements.length > 0) {
+              console.log(`Found ${playElements.length} element(s) with aria-label containing "Play":`);
+              playElements.forEach((el: any) => {
+                console.log(`  - ${el.tagName}${el.id ? '#' + el.id : ''}${el.className ? '.' + el.className.split(' ')[0] : ''} (aria-label: "${el.ariaLabel}")`);
+              });
+              
+              // Try to click the first one
+              foundSelector = '[aria-label*="Play"]';
+              elementFound = true;
+            }
+          } catch (e) {
+            console.warn('Could not find elements with aria-label containing "Play"');
+          }
+        }
+        
+        if (elementFound) {
+          // Try to click, with retry
+          let clicked = false;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              await this.page.click(foundSelector);
+              clicked = true;
+              break;
+            } catch (e) {
+              if (attempt < 2) {
+                console.log(`Click attempt ${attempt + 1} failed, retrying...`);
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              } else {
+                // Try with evaluateHandle as last resort
+                try {
+                  const elementHandle = await this.page.$(foundSelector);
+                  if (elementHandle) {
+                    await elementHandle.click();
+                    clicked = true;
+                    await elementHandle.dispose();
+                  }
+                } catch (evalError) {
+                  throw e;
+                }
+              }
+            }
+          }
+          
+          if (clicked) {
+            console.log('Click performed successfully');
+          }
+        } else {
+          throw new Error(`Could not find element with selector: ${selector}`);
         }
       } else if (x !== undefined && y !== undefined) {
         console.log(`Clicking at coordinates: (${x}, ${y})`);
