@@ -153,20 +153,22 @@ class WebStreamer {
 
     // When using virtual display, we need headless: false so browser renders to X display
     // FFmpeg will capture from the virtual display
-    // Configure PulseAudio environment for browser to use stream_sink
-    if (useVirtualDisplay && process.platform === 'linux') {
-      // Set PulseAudio environment variables so browser uses stream_sink
-      process.env.PULSE_RUNTIME_PATH = process.env.HOME ? `${process.env.HOME}/.config/pulse` : '/tmp/pulse';
-      process.env.PULSE_STATE_PATH = process.env.HOME ? `${process.env.HOME}/.config/pulse` : '/tmp/pulse';
-      
-      // Create pulse directory if it doesn't exist
-      const { execSync } = require('child_process');
-      try {
-        execSync('mkdir -p /tmp/pulse 2>/dev/null || true');
-      } catch (e) {
-        // Ignore errors
+      // Configure PulseAudio environment for browser to use stream_sink
+      if (useVirtualDisplay && process.platform === 'linux') {
+        // Set PulseAudio environment variables so browser uses stream_sink
+        process.env.PULSE_RUNTIME_PATH = process.env.HOME ? `${process.env.HOME}/.config/pulse` : '/tmp/pulse';
+        process.env.PULSE_STATE_PATH = process.env.HOME ? `${process.env.HOME}/.config/pulse` : '/tmp/pulse';
+        // Force browser to use stream_sink
+        process.env.PULSE_SINK = 'stream_sink';
+        
+        // Create pulse directory if it doesn't exist
+        const { execSync } = require('child_process');
+        try {
+          execSync('mkdir -p /tmp/pulse 2>/dev/null || true');
+        } catch (e) {
+          // Ignore errors
+        }
       }
-    }
 
     // Use app mode to hide browser UI - launch with URL directly
     this.browser = await puppeteer.launch({
@@ -241,14 +243,14 @@ class WebStreamer {
     // Since stream_sink is the default sink, new audio should automatically go there
     if (useVirtualDisplay && process.platform === 'linux') {
       console.log('Waiting for audio to start and appear in stream_sink...');
-      await new Promise((resolve) => setTimeout(resolve, 3000)); // Wait longer for audio to start
+      await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait longer for audio to start after click
       
       const { exec } = require('child_process');
       
       // Wait for audio to appear in stream_sink (it should be there automatically since it's default)
       await new Promise<void>((resolve) => {
         let attempts = 0;
-        const maxAttempts = 10; // Reduced to 10 attempts (20 seconds total)
+        const maxAttempts = 20; // Increased to 20 attempts (40 seconds total)
         
         const checkAudio = () => {
           attempts++;
@@ -261,6 +263,7 @@ class WebStreamer {
               console.log(`Found ${lines.length} sink input(s) in PulseAudio`);
               
               // Check each sink input to see where it's going
+              let movedAny = false;
               lines.forEach((line: string) => {
                 const parts = line.split('\t');
                 const inputId = parts[0];
@@ -271,18 +274,37 @@ class WebStreamer {
                 if (!sinkName.includes('stream_sink')) {
                   exec(`pactl move-sink-input ${inputId} stream_sink`, (moveError: any) => {
                     if (!moveError) {
-                      console.log(`  Moved sink input ${inputId} to stream_sink`);
+                      console.log(`  ✓ Moved sink input ${inputId} to stream_sink`);
+                      movedAny = true;
+                    } else {
+                      console.warn(`  ✗ Failed to move sink input ${inputId}: ${moveError}`);
                     }
                   });
                 } else {
-                  console.log(`  Sink input ${inputId} already in stream_sink`);
+                  console.log(`  ✓ Sink input ${inputId} already in stream_sink`);
+                  movedAny = true;
                 }
               });
               
-              // If we found any sink inputs, we're good (they're being moved to stream_sink)
+              // If we found any sink inputs, wait a moment then verify they're in stream_sink
               if (lines.length > 0) {
-                console.log('Audio detected, continuing with stream...');
-                resolve();
+                setTimeout(() => {
+                  // Verify they're actually in stream_sink now
+                  exec('pactl list sink-inputs | grep -A5 "Sink:" | grep -A5 "stream_sink" | grep "Sink Input"', (verifyError: any, verifyStdout: any) => {
+                    if (!verifyError && verifyStdout && verifyStdout.trim()) {
+                      console.log('✓ Audio confirmed in stream_sink, ready for FFmpeg');
+                      resolve();
+                    } else {
+                      console.log('Audio found but not yet in stream_sink, waiting a bit more...');
+                      if (attempts < maxAttempts) {
+                        setTimeout(checkAudio, 2000);
+                      } else {
+                        console.warn('Audio found but could not verify it\'s in stream_sink');
+                        resolve();
+                      }
+                    }
+                  });
+                }, 2000);
                 return;
               }
             }
@@ -293,8 +315,11 @@ class WebStreamer {
               setTimeout(checkAudio, 2000);
             } else {
               console.warn('No audio sink inputs found after multiple attempts');
-              console.warn('Continuing anyway - audio may start later or may not be playing');
-              console.warn('FFmpeg will try to capture from stream_sink.monitor');
+              console.warn('This may mean:');
+              console.warn('  1. Audio is not playing in the browser');
+              console.warn('  2. Browser is not using PulseAudio');
+              console.warn('  3. Audio started before stream_sink was set as default');
+              console.warn('Continuing anyway - FFmpeg will try to capture from stream_sink.monitor');
               resolve();
             }
           });
@@ -305,7 +330,7 @@ class WebStreamer {
       
       // Additional wait to ensure audio is playing
       console.log('Final wait before starting FFmpeg...');
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
 
     // Additional wait to ensure page is fully rendered before capturing
@@ -661,15 +686,28 @@ class WebStreamer {
                     console.log('Monitor stream_sink.monitor confirmed');
                   }
                   
-                  // Set stream_sink as default sink for new applications
-                  exec('pactl set-default-sink stream_sink', (setError: any) => {
-                    if (setError) {
-                      console.warn('Could not set stream_sink as default, but sink exists');
+              // Set stream_sink as default sink for new applications
+              exec('pactl set-default-sink stream_sink', (setError: any) => {
+                if (setError) {
+                  console.warn('Could not set stream_sink as default, but sink exists');
+                } else {
+                  console.log('stream_sink set as default sink');
+                }
+                
+                // Also create a loopback from default source to stream_sink
+                // This will route any audio going to the default sink to stream_sink
+                setTimeout(() => {
+                  exec('pactl load-module module-loopback source=@DEFAULT_SOURCE@ sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
+                    if (loopbackError) {
+                      console.warn('Could not create loopback (may not be needed):', loopbackError.message);
                     } else {
-                      console.log('stream_sink set as default sink');
+                      const loopbackId = loopbackStdout?.toString().trim();
+                      console.log(`Loopback created (module ID: ${loopbackId}) - routing default source to stream_sink`);
                     }
                     resolve();
                   });
+                }, 500);
+              });
                 });
               }, 500);
             }
