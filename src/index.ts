@@ -26,6 +26,7 @@ class WebStreamer {
   private xvfbProcess: ChildProcess | null = null;
   private wmProcess: ChildProcess | null = null;
   private pulseAudioProcess: ChildProcess | null = null;
+  private parecProcess: ChildProcess | null = null;
   private displayNumber: number = 99;
 
   /**
@@ -956,28 +957,41 @@ class WebStreamer {
               console.warn('Could not get default sink, using auto_null');
             }
             
-            // Create loopback from default sink monitor to stream_sink
-            // This routes any audio captured from default sink to stream_sink
-            if (defaultSink !== 'stream_sink' && defaultSink !== 'auto_null') {
-              exec(`pactl load-module module-loopback source=${defaultSink}.monitor sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
-                if (!loopbackError && loopbackStdout) {
-                  const loopbackId = loopbackStdout.toString().trim();
-                  console.log(`Loopback created (module ID: ${loopbackId}) - routing ${defaultSink}.monitor to stream_sink`);
-                } else {
-                  console.warn('Could not create loopback from default sink');
+            // Since stream_sink is the only sink, browser audio must be going elsewhere
+            // Try to create loopback from all available sources to stream_sink
+            try {
+              // Get all available sources (monitors)
+              const allSources = execSync('pactl list sources short | cut -f2', { encoding: 'utf8' }).trim().split('\n');
+              console.log(`Available sources: ${allSources.join(', ')}`);
+              
+              // Try to create loopback from each source to stream_sink
+              allSources.forEach((source: string) => {
+                if (source.includes('.monitor') && !source.includes('stream_sink')) {
+                  exec(`pactl load-module module-loopback source=${source} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                    if (!loopbackError && loopbackStdout) {
+                      const loopbackId = loopbackStdout.toString().trim();
+                      console.log(`Loopback created (module ID: ${loopbackId}) - routing ${source} to stream_sink`);
+                    }
+                  });
                 }
               });
-            }
-            
-            // Also try to create combine-sink as backup
-            if (defaultSink !== 'stream_sink' && defaultSink !== 'auto_null') {
-              exec('pactl load-module module-combine-sink sink_name=combined_sink slaves=' + defaultSink + ',stream_sink', (combineError: any, combineStdout: any) => {
-                if (!combineError && combineStdout) {
-                  const combineId = combineStdout.toString().trim();
-                  console.log(`Combine-sink created (module ID: ${combineId}) - combining ${defaultSink} with stream_sink`);
-                  exec('pactl set-default-sink combined_sink', () => {});
+              
+              // Also try to create loopback from default source
+              try {
+                const defaultSource = execSync('pactl info | grep "Default Source" | cut -d: -f2 | xargs', { encoding: 'utf8' }).trim();
+                if (defaultSource && !defaultSource.includes('stream_sink')) {
+                  exec(`pactl load-module module-loopback source=${defaultSource} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                    if (!loopbackError && loopbackStdout) {
+                      const loopbackId = loopbackStdout.toString().trim();
+                      console.log(`Loopback from default source created (module ID: ${loopbackId}) - routing ${defaultSource} to stream_sink`);
+                    }
+                  });
                 }
-              });
+              } catch (e) {
+                console.warn('Could not get default source');
+              }
+            } catch (e) {
+              console.warn('Could not list sources for loopback');
             }
           } catch (e) {
             console.warn('Could not setup audio routing:', e);
