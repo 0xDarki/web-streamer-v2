@@ -379,68 +379,91 @@ class WebStreamer {
       
       const pulseEnv = this.getPulseEnv();
       
-      // First, ensure PulseAudio is running
-      try {
-        execSync('pactl info > /dev/null 2>&1', { 
-          env: pulseEnv,
-          stdio: 'ignore' 
-        });
-        console.log('✓ PulseAudio is running');
-      } catch (e) {
-        console.warn('✗ PulseAudio not responding! Restarting...');
-        try {
-          execSync('pulseaudio --kill 2>/dev/null || true', { 
-            env: pulseEnv,
-            stdio: 'ignore' 
-          });
-          execSync('pulseaudio --start --exit-idle-time=-1 --system=false --disallow-exit 2>/dev/null &', { 
-            env: pulseEnv,
-            stdio: 'ignore' 
-          });
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          console.log('✓ PulseAudio restarted');
-        } catch (e2) {
-          console.error('Failed to restart PulseAudio:', e2);
-        }
-      }
-      
-      // Check if sink still exists
-      try {
-        execSync('pactl list sinks | grep -q "stream_sink"', { 
-          env: pulseEnv,
-          stdio: 'ignore' 
-        });
-        console.log('✓ stream_sink still exists before FFmpeg start');
-      } catch (e) {
-        console.warn('✗ stream_sink not found! Recreating...');
-        // Recreate the sink
-        try {
-          execSync('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', { 
-            env: pulseEnv,
-            stdio: 'ignore' 
-          });
-          execSync('pactl set-default-sink stream_sink', { 
-            env: pulseEnv,
-            stdio: 'ignore' 
-          });
-          console.log('✓ stream_sink recreated');
-          
-          // Wait a moment for monitor to be created
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          
-          // Verify monitor exists
+      // Robust verification function
+      const verifyPulseAudio = async (maxAttempts: number = 10): Promise<boolean> => {
+        for (let i = 0; i < maxAttempts; i++) {
           try {
-            execSync('pactl list sources | grep -q "stream_sink.monitor"', { 
+            // Check if PulseAudio is accessible
+            execSync('pactl info > /dev/null 2>&1', { 
               env: pulseEnv,
               stdio: 'ignore' 
             });
-            console.log('✓ Monitor stream_sink.monitor confirmed');
-          } catch (e3) {
-            console.warn('✗ Monitor still not found after recreation');
+            
+            // Check if socket exists
+            const socketPath = `${pulseEnv.PULSE_RUNTIME_PATH}/native`;
+            try {
+              execSync(`test -S "${socketPath}"`, { stdio: 'ignore' });
+            } catch (e) {
+              console.log(`Waiting for PulseAudio socket (attempt ${i + 1}/${maxAttempts})...`);
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              continue;
+            }
+            
+            // Check if sink exists
+            try {
+              execSync('pactl list sinks | grep -q "stream_sink"', { 
+                env: pulseEnv,
+                stdio: 'ignore' 
+              });
+            } catch (e) {
+              console.log(`stream_sink not found, recreating (attempt ${i + 1}/${maxAttempts})...`);
+              try {
+                execSync('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', { 
+                  env: pulseEnv,
+                  stdio: 'ignore' 
+                });
+                execSync('pactl set-default-sink stream_sink', { 
+                  env: pulseEnv,
+                  stdio: 'ignore' 
+                });
+                await new Promise((resolve) => setTimeout(resolve, 500));
+              } catch (e2) {
+                console.warn(`Failed to recreate sink: ${e2}`);
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                continue;
+              }
+            }
+            
+            // Check if monitor exists
+            try {
+              execSync('pactl list sources | grep -q "stream_sink.monitor"', { 
+                env: pulseEnv,
+                stdio: 'ignore' 
+              });
+              console.log('✓ PulseAudio fully ready: socket, sink, and monitor confirmed');
+              return true;
+            } catch (e) {
+              console.log(`Monitor not ready yet (attempt ${i + 1}/${maxAttempts})...`);
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              continue;
+            }
+          } catch (e) {
+            console.log(`PulseAudio not accessible yet (attempt ${i + 1}/${maxAttempts})...`);
+            // Try to restart PulseAudio
+            try {
+              execSync('pulseaudio --kill 2>/dev/null || true', { 
+                env: pulseEnv,
+                stdio: 'ignore' 
+              });
+              execSync('pulseaudio --daemonize --exit-idle-time=-1 --system=false --disallow-exit', { 
+                env: pulseEnv,
+                stdio: 'ignore' 
+              });
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+            } catch (e2) {
+              // Ignore restart errors
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500));
           }
-        } catch (e2) {
-          console.error('Failed to recreate stream_sink:', e2);
         }
+        return false;
+      };
+      
+      // Verify PulseAudio is ready
+      const isReady = await verifyPulseAudio(15);
+      if (!isReady) {
+        console.warn('⚠ PulseAudio verification failed, but continuing anyway...');
+        console.warn('Audio capture may not work');
       }
     }
 
