@@ -858,25 +858,38 @@ class WebStreamer {
             stdio: 'ignore' 
           });
           
-          // Also check if the socket exists (more reliable)
-          const socketPath = pulseEnv.PULSE_RUNTIME_PATH + '/native';
-          let socketFound = false;
+          // Check if socket exists and is accessible
+          let socketPath = pulseEnv.PULSE_RUNTIME_PATH + '/native';
+          let socketExists = false;
           try {
             execSync(`test -S "${socketPath}"`, { stdio: 'ignore' });
-            socketFound = true;
+            socketExists = true;
             console.log(`✓ PulseAudio socket found at ${socketPath}`);
+            
+            // Check socket permissions
+            try {
+              const socketInfo = execSync(`ls -la "${socketPath}"`, { encoding: 'utf8' });
+              console.log(`Socket info: ${socketInfo.trim()}`);
+            } catch (e) {
+              // Ignore
+            }
           } catch (socketError) {
-            // Socket not found, try alternative locations
+            console.log(`Socket not found at ${socketPath}, checking alternative locations...`);
+            // Try to find socket in other locations
             const altPaths = [
               '/tmp/pulse/native',
               process.env.HOME ? `${process.env.HOME}/.config/pulse/native` : null,
+              '/run/user/' + (process.getuid ? process.getuid() : '1000') + '/pulse/native'
             ].filter(p => p !== null);
             
             for (const altPath of altPaths) {
               try {
                 execSync(`test -S "${altPath}"`, { stdio: 'ignore' });
-                console.log(`✓ PulseAudio socket found at ${altPath}`);
-                socketFound = true;
+                console.log(`✓ Found PulseAudio socket at ${altPath}`);
+                socketExists = true;
+                // Update PULSE_RUNTIME_PATH to match found socket
+                pulseEnv.PULSE_RUNTIME_PATH = altPath.replace('/native', '');
+                socketPath = altPath;
                 break;
               } catch (e) {
                 // Not found at this path
@@ -885,34 +898,57 @@ class WebStreamer {
           }
           
           // Try to use pactl to verify PulseAudio is accessible
-          try {
-            const pactlInfo = execSync('pactl info', { 
-              env: pulseEnv,
-              encoding: 'utf8',
-              stdio: 'pipe'
-            });
-            if (pactlInfo && pactlInfo.includes('Server String')) {
-              console.log('✓ PulseAudio is accessible via pactl');
-            } else {
-              throw new Error('pactl info did not return expected output');
+          if (socketExists) {
+            try {
+              const pactlInfo = execSync('pactl info', { 
+                env: pulseEnv,
+                encoding: 'utf8',
+                stdio: 'pipe',
+                timeout: 2000
+              });
+              if (pactlInfo && pactlInfo.includes('Server String')) {
+                console.log('✓ PulseAudio is accessible via pactl');
+              } else {
+                throw new Error('pactl info did not return expected output');
+              }
+            } catch (pactlError: any) {
+              if (attempts < maxAttempts) {
+                console.log(`PulseAudio socket exists but pactl not accessible yet (attempt ${attempts}/${maxAttempts})...`);
+                if (pactlError.stderr) {
+                  console.log(`pactl error: ${pactlError.stderr.toString()}`);
+                }
+                setTimeout(checkPulse, 500);
+                return;
+              } else {
+                console.warn('⚠ PulseAudio socket exists but pactl is not accessible');
+                console.warn('This may indicate a permissions issue or PulseAudio configuration problem');
+              }
             }
-          } catch (pactlError) {
+          } else {
             if (attempts < maxAttempts) {
-              console.log(`PulseAudio not accessible via pactl yet (attempt ${attempts}/${maxAttempts})...`);
+              console.log(`PulseAudio socket not found yet (attempt ${attempts}/${maxAttempts})...`);
               setTimeout(checkPulse, 500);
               return;
             } else {
-              console.warn('⚠ PulseAudio is running but pactl is not accessible');
+              console.warn('⚠ PulseAudio socket was never created');
+              console.warn('PulseAudio may have failed to start properly');
             }
           }
           
-          if (!socketFound && attempts < maxAttempts) {
-            console.log(`PulseAudio socket not ready yet (attempt ${attempts}/${maxAttempts})...`);
-            setTimeout(checkPulse, 500);
-            return;
+          // If we got here and socket exists and pactl works, we're good
+          if (socketExists) {
+            console.log('✓ PulseAudio is running and accessible');
+          } else {
+            // Socket doesn't exist, but we'll continue anyway
+            if (attempts < maxAttempts) {
+              console.log(`PulseAudio socket not found yet (attempt ${attempts}/${maxAttempts})...`);
+              setTimeout(checkPulse, 500);
+              return;
+            } else {
+              console.warn('⚠ PulseAudio socket was never created');
+              console.warn('PulseAudio may have failed to start properly');
+            }
           }
-          
-          console.log('✓ PulseAudio is running and accessible');
           
           // Create virtual sink
           console.log('Creating virtual sink...');
