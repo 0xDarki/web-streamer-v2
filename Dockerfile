@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy package files
-COPY package*.json ./
+COPY package.json package-lock.json ./
 COPY tsconfig.json ./
 
 # Install dependencies

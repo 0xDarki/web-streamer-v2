@@ -156,16 +156,22 @@ This application is configured to run on [Railway](https://railway.app), a cloud
 
 2. **Set Environment Variables:**
    In your Railway project settings, add these environment variables:
+   
+   **Required:**
    - `WEBPAGE_URL` - The URL of the webpage to stream (e.g., `https://example.com`)
    - `RTMPS_URL` - Your RTMPS streaming endpoint (e.g., `rtmps://stream.example.com/live/key`)
-   - `WIDTH` (optional) - Video width in pixels (default: 1920)
-   - `HEIGHT` (optional) - Video height in pixels (default: 1080)
-   - `FPS` (optional) - Frame rate (default: 30, lightweight default: 1)
-   - `LIGHTWEIGHT` (optional) - Set to `true` to enable lightweight mode (optimized encoding, 1fps default)
-   - `CLICK_SELECTOR` (optional) - CSS selector to click (e.g., `button.play`)
-   - `CLICK_X` (optional) - X coordinate to click (requires `CLICK_Y`)
-   - `CLICK_Y` (optional) - Y coordinate to click (requires `CLICK_X`)
-   - `CLICK_DELAY` (optional) - Delay after click in milliseconds (default: 1000)
+   
+   **Optional:**
+   - `WIDTH` - Video width in pixels (default: 1920)
+   - `HEIGHT` - Video height in pixels (default: 1080)
+   - `FPS` - Frame rate (default: 30, lightweight default: 1)
+   - `LIGHTWEIGHT` - Set to `true` to enable lightweight mode (optimized encoding, 1fps default)
+   
+   **Click Action (for audio playback):**
+   - `CLICK_SELECTOR` - CSS selector to click (e.g., `button.play`, `[aria-label='Play']`)
+   - `CLICK_X` - X coordinate to click (requires `CLICK_Y`)
+   - `CLICK_Y` - Y coordinate to click (requires `CLICK_X`)
+   - `CLICK_DELAY` - Delay after click in milliseconds (default: 1000)
 
 3. **Deploy:**
    - If using GitHub: Push your code and Railway will automatically deploy
@@ -314,12 +320,62 @@ Monitor your Railway deployment:
 If you prefer using Railway CLI, you can also set environment variables via CLI:
 
 ```bash
+# Required variables
 railway variables set WEBPAGE_URL=https://example.com
 railway variables set RTMPS_URL=rtmps://stream.example.com/live/key
+
+# Optional streaming settings
 railway variables set WIDTH=1920
 railway variables set HEIGHT=1080
 railway variables set FPS=30
+railway variables set LIGHTWEIGHT=true
+
+# Click action for audio playback
+railway variables set CLICK_SELECTOR="[aria-label='Play']"
+railway variables set CLICK_DELAY=2000
 ```
+
+### Railway Click Action Examples
+
+**Example 1: Using CSS Selector with aria-label**
+```bash
+# In Railway dashboard or CLI:
+CLICK_SELECTOR=[aria-label='Play']
+CLICK_DELAY=2000
+```
+
+**Example 2: Using Button Class**
+```bash
+CLICK_SELECTOR=button.play
+CLICK_DELAY=1000
+```
+
+**Example 3: Using Coordinates (center of screen)**
+```bash
+CLICK_X=960
+CLICK_Y=540
+CLICK_DELAY=1500
+```
+
+**Example 4: Complete Railway Setup with Click**
+```bash
+# Required
+WEBPAGE_URL=https://example.com
+RTMPS_URL=rtmps://stream.example.com/live/key
+
+# Lightweight mode
+LIGHTWEIGHT=true
+FPS=1
+
+# Click to enable audio
+CLICK_SELECTOR=[aria-label='Play']
+CLICK_DELAY=2000
+```
+
+**Note:** When setting `CLICK_SELECTOR` in Railway:
+- Use single quotes inside: `[aria-label='Play']`
+- Or escape quotes: `button[aria-label=\"Play\"]`
+- Railway dashboard will handle the quotes automatically
 
 ## How It Works
 

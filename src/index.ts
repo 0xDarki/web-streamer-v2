@@ -483,6 +483,10 @@ async function main() {
   const widthIndex = args.indexOf('--width');
   const heightIndex = args.indexOf('--height');
   const fpsIndex = args.indexOf('--fps');
+  const clickSelectorIndex = args.indexOf('--click-selector');
+  const clickXIndex = args.indexOf('--click-x');
+  const clickYIndex = args.indexOf('--click-y');
+  const clickDelayIndex = args.indexOf('--click-delay');
   const audioDeviceIndex = args.indexOf('--audio-device');
   const videoDeviceIndex = args.indexOf('--video-device');
   const lightweight = args.includes('--lightweight') || process.env.LIGHTWEIGHT === 'true';
@@ -499,6 +503,18 @@ async function main() {
     fps: fpsIndex !== -1 
       ? parseInt(args[fpsIndex + 1]) 
       : parseInt(process.env.FPS || '30'),
+    clickSelector: clickSelectorIndex !== -1 
+      ? args[clickSelectorIndex + 1] 
+      : process.env.CLICK_SELECTOR,
+    clickX: clickXIndex !== -1 
+      ? parseInt(args[clickXIndex + 1]) 
+      : process.env.CLICK_X ? parseInt(process.env.CLICK_X) : undefined,
+    clickY: clickYIndex !== -1 
+      ? parseInt(args[clickYIndex + 1]) 
+      : process.env.CLICK_Y ? parseInt(process.env.CLICK_Y) : undefined,
+    clickDelay: clickDelayIndex !== -1 
+      ? parseInt(args[clickDelayIndex + 1]) 
+      : parseInt(process.env.CLICK_DELAY || '1000'),
     audioDevice: audioDeviceIndex !== -1 ? args[audioDeviceIndex + 1] : undefined,
     videoDevice: videoDeviceIndex !== -1 ? args[videoDeviceIndex + 1] : undefined,
     useVirtualDisplay: process.env.USE_VIRTUAL_DISPLAY === 'true' || 
