@@ -658,92 +658,130 @@ class WebStreamer {
   private async startPulseAudio(): Promise<void> {
     return new Promise((resolve) => {
       console.log('Starting PulseAudio for audio capture...');
-
-      // Start PulseAudio daemon with explicit socket path
-      // Use --daemonize to run in background, but capture stderr to see errors
-      this.pulseAudioProcess = spawn('pulseaudio', [
-        '--start',
-        '--exit-idle-time=-1',
-        '--system=false',
-        '--disallow-exit',
-      ], {
-        env: {
-          ...process.env,
-          PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
-          PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
-        }
-      });
+      const { exec, execSync } = require('child_process');
       
-      // Capture PulseAudio output for debugging
-      this.pulseAudioProcess.stderr?.on('data', (data: Buffer) => {
-        const output = data.toString();
-        if (output.includes('error') || output.includes('Error') || output.includes('failed')) {
-          console.warn(`PulseAudio stderr: ${output}`);
+      // First, check if PulseAudio is already running
+      let pulseRunning = false;
+      try {
+        execSync('pulseaudio --check', { stdio: 'ignore' });
+        pulseRunning = true;
+        console.log('✓ PulseAudio is already running');
+      } catch (e) {
+        console.log('PulseAudio is not running, starting it...');
+      }
+      
+      // If not running, start it
+      if (!pulseRunning) {
+        // Kill any existing PulseAudio processes
+        try {
+          execSync('pkill -9 pulseaudio 2>/dev/null || true', { stdio: 'ignore' });
+        } catch (e) {
+          // Ignore errors
         }
-      });
-
-      this.pulseAudioProcess.on('error', (error) => {
-        console.warn(`PulseAudio start warning: ${error.message}`);
-        // Continue anyway - audio might not be critical
-      });
-
-      // Wait for PulseAudio to start, then create a virtual sink
-      setTimeout(() => {
-        console.log('PulseAudio started, creating virtual sink...');
         
-        // Create a null sink (virtual audio device) that we can monitor
-        const { exec } = require('child_process');
+        // Start PulseAudio daemon
+        this.pulseAudioProcess = spawn('pulseaudio', [
+          '--start',
+          '--exit-idle-time=-1',
+          '--system=false',
+          '--disallow-exit',
+        ], {
+          env: {
+            ...process.env,
+            PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
+            PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
+          }
+        });
         
-        // First, unload any existing sink with the same name
-        exec('pactl unload-module module-null-sink 2>/dev/null || true', () => {
-          // Create a null sink (virtual audio device) that we can monitor
-          exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', (error: any, stdout: any, stderr: any) => {
-            if (error) {
-              console.warn('Could not create virtual sink, audio capture may not work');
-              console.warn(`Error: ${stderr}`);
-              resolve(); // Continue anyway
-            } else {
-              const moduleId = stdout?.toString().trim();
-              console.log(`Virtual sink created successfully (module ID: ${moduleId})`);
-              
-              // Wait a moment for the monitor to be created
-              setTimeout(() => {
-                // Verify monitor exists
-                exec('pactl list sources | grep -q "stream_sink.monitor"', (monitorError: any) => {
-                  if (monitorError) {
-                    console.warn('Monitor not found, but sink exists');
-                  } else {
-                    console.log('Monitor stream_sink.monitor confirmed');
-                  }
-                  
-              // Set stream_sink as default sink for new applications
-              exec('pactl set-default-sink stream_sink', (setError: any) => {
-                if (setError) {
-                  console.warn('Could not set stream_sink as default, but sink exists');
-                } else {
-                  console.log('stream_sink set as default sink');
-                }
+        // Capture PulseAudio output for debugging
+        this.pulseAudioProcess.stderr?.on('data', (data: Buffer) => {
+          const output = data.toString();
+          if (output.includes('error') || output.includes('Error') || output.includes('failed')) {
+            console.warn(`PulseAudio stderr: ${output}`);
+          }
+        });
+
+        this.pulseAudioProcess.on('error', (error) => {
+          console.warn(`PulseAudio start warning: ${error.message}`);
+          // Continue anyway - audio might not be critical
+        });
+      }
+
+      // Wait for PulseAudio to be ready, then create a virtual sink
+      let attempts = 0;
+      const maxAttempts = 10;
+      
+      const checkPulse = () => {
+        attempts++;
+        try {
+          execSync('pulseaudio --check', { stdio: 'ignore' });
+          console.log('✓ PulseAudio is running and accessible');
+          
+          // Create virtual sink
+          console.log('Creating virtual sink...');
+          
+          // First, unload any existing sink with the same name
+          exec('pactl unload-module module-null-sink 2>/dev/null || true', () => {
+            // Create a null sink (virtual audio device) that we can monitor
+            exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', (error: any, stdout: any, stderr: any) => {
+              if (error) {
+                console.warn('Could not create virtual sink, audio capture may not work');
+                console.warn(`Error: ${stderr}`);
+                resolve(); // Continue anyway
+              } else {
+                const moduleId = stdout?.toString().trim();
+                console.log(`✓ Virtual sink created successfully (module ID: ${moduleId})`);
                 
-                // Also create a loopback from default source to stream_sink
-                // This will route any audio going to the default sink to stream_sink
+                // Wait a moment for the monitor to be created
                 setTimeout(() => {
-                  exec('pactl load-module module-loopback source=@DEFAULT_SOURCE@ sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
-                    if (loopbackError) {
-                      console.warn('Could not create loopback (may not be needed):', loopbackError.message);
+                  // Verify monitor exists
+                  exec('pactl list sources | grep -q "stream_sink.monitor"', (monitorError: any) => {
+                    if (monitorError) {
+                      console.warn('Monitor not found, but sink exists');
                     } else {
-                      const loopbackId = loopbackStdout?.toString().trim();
-                      console.log(`Loopback created (module ID: ${loopbackId}) - routing default source to stream_sink`);
+                      console.log('✓ Monitor stream_sink.monitor confirmed');
                     }
-                    resolve();
+                    
+                    // Set stream_sink as default sink for new applications
+                    exec('pactl set-default-sink stream_sink', (setError: any) => {
+                      if (setError) {
+                        console.warn('Could not set stream_sink as default, but sink exists');
+                      } else {
+                        console.log('✓ stream_sink set as default sink');
+                      }
+                      
+                      // Also create a loopback from default source to stream_sink
+                      // This will route any audio going to the default sink to stream_sink
+                      setTimeout(() => {
+                        exec('pactl load-module module-loopback source=@DEFAULT_SOURCE@ sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
+                          if (loopbackError) {
+                            console.warn('Could not create loopback (may not be needed):', loopbackError.message);
+                          } else {
+                            const loopbackId = loopbackStdout?.toString().trim();
+                            console.log(`✓ Loopback created (module ID: ${loopbackId}) - routing default source to stream_sink`);
+                          }
+                          resolve();
+                        });
+                      }, 500);
+                    });
                   });
                 }, 500);
-              });
-                });
-              }, 500);
-            }
+              }
+            });
           });
-        });
-      }, 2000);
+        } catch (e) {
+          if (attempts < maxAttempts) {
+            console.log(`Waiting for PulseAudio to be ready (attempt ${attempts}/${maxAttempts})...`);
+            setTimeout(checkPulse, 500);
+          } else {
+            console.error('✗ PulseAudio failed to start after multiple attempts');
+            resolve(); // Continue anyway
+          }
+        }
+      };
+      
+      // Start checking after a short delay
+      setTimeout(checkPulse, pulseRunning ? 500 : 2000);
     });
   }
 
