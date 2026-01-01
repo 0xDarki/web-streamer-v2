@@ -78,6 +78,10 @@ class WebStreamer {
       '--window-size=' + finalWidth + ',' + finalHeight,
       '--start-maximized',
       '--window-position=0,0', // Position window at top-left
+      // Set PulseAudio sink for browser audio (if using virtual display)
+      ...(useVirtualDisplay && process.platform === 'linux' 
+        ? ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
+        : []),
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -246,6 +250,7 @@ class WebStreamer {
         '--start',
         '--exit-idle-time=-1',
         '--system=false',
+        '--disallow-exit',
       ]);
 
       this.pulseAudioProcess.on('error', (error) => {
@@ -253,11 +258,21 @@ class WebStreamer {
         // Continue anyway - audio might not be critical
       });
 
-      // Wait a moment for PulseAudio to start
+      // Wait for PulseAudio to start, then create a virtual sink
       setTimeout(() => {
-        console.log('PulseAudio started (or already running)');
-        resolve();
-      }, 1000);
+        console.log('PulseAudio started, creating virtual sink...');
+        
+        // Create a null sink (virtual audio device) that we can monitor
+        const { exec } = require('child_process');
+        exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', (error: any) => {
+          if (error) {
+            console.warn('Could not create virtual sink, audio capture may not work');
+          } else {
+            console.log('Virtual sink created successfully');
+          }
+          resolve();
+        });
+      }, 2000);
     });
   }
 
@@ -319,6 +334,113 @@ class WebStreamer {
   }
 
   /**
+   * Retry FFmpeg with silent audio if audio capture fails
+   */
+  private async retryWithSilentAudio(
+    rtmpsUrl: string,
+    width: number,
+    height: number,
+    fps: number,
+    useVirtualDisplay: boolean,
+    lightweight: boolean
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const platform = process.platform;
+      let inputOptions: string[] = [];
+      const display = process.env.DISPLAY || ':0.0';
+      const videoInput = `${display}+0,0`;
+      
+      inputOptions = [
+        '-f', 'x11grab',
+        '-framerate', fps.toString(),
+        '-video_size', `${width}x${height}`,
+        '-i', videoInput,
+        '-f', 'lavfi',
+        '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+      ];
+
+      const preset = lightweight ? 'ultrafast' : 'veryfast';
+      const crf = lightweight ? '28' : '23';
+      const maxrate = lightweight ? '1500k' : '4000k';
+      const bufsize = lightweight ? '3000k' : '8000k';
+      const audioBitrate = lightweight ? '64k' : '128k';
+      const audioSampleRate = lightweight ? '22050' : '44100';
+      const gopSize = fps <= 1 ? fps.toString() : (2 * fps).toString();
+
+      const outputOptions = [
+        '-c:v', 'libx264',
+        '-preset', preset,
+        '-tune', 'zerolatency',
+        '-crf', crf,
+        '-maxrate', maxrate,
+        '-bufsize', bufsize,
+        '-pix_fmt', 'yuv420p',
+        '-g', gopSize,
+        '-threads', lightweight ? '2' : '0',
+        '-c:a', 'aac',
+        '-b:a', audioBitrate,
+        '-ar', audioSampleRate,
+        '-ac', '2',
+        '-f', 'flv',
+        rtmpsUrl,
+      ];
+
+      const ffmpegArgs = [...inputOptions, ...outputOptions];
+      console.log('Retrying FFmpeg with silent audio:', ffmpegArgs.join(' '));
+
+      this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+
+      if (this.ffmpegProcess.stdout) {
+        this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
+          console.log(`FFmpeg stdout: ${data.toString()}`);
+        });
+      }
+
+      if (this.ffmpegProcess.stderr) {
+        this.ffmpegProcess.stderr.on('data', (data: Buffer) => {
+          const output = data.toString();
+          if (output.includes('error') || output.includes('Error')) {
+            console.error(`FFmpeg error: ${output}`);
+          } else {
+            console.log(`FFmpeg: ${output}`);
+          }
+        });
+      }
+
+      // Track if we've already retried
+      let hasRetried = false;
+      
+      this.ffmpegProcess.on('close', (code: number) => {
+        console.log(`FFmpeg process exited with code ${code}`);
+        if (code !== 0 && code !== null) {
+          // If audio capture fails and we haven't retried, try with silent audio
+          if (useVirtualDisplay && !hasRetried) {
+            hasRetried = true;
+            console.log('Audio capture failed, retrying with silent audio...');
+            this.retryWithSilentAudio(rtmpsUrl, width, height, fps, useVirtualDisplay, lightweight)
+              .then(resolve)
+              .catch((retryError) => {
+                reject(new Error(`FFmpeg exited with code ${code}. Retry also failed: ${retryError.message}`));
+              });
+          } else {
+            reject(new Error(`FFmpeg exited with code ${code}`));
+          }
+        }
+      });
+
+      this.ffmpegProcess.on('error', (error: Error) => {
+        reject(error);
+      });
+
+      setTimeout(() => {
+        if (this.ffmpegProcess && !this.ffmpegProcess.killed) {
+          resolve();
+        }
+      }, 2000);
+    });
+  }
+
+  /**
    * Start FFmpeg process to capture screen/audio and stream to RTMPS
    */
   private async startFFmpegStream(
@@ -363,12 +485,13 @@ class WebStreamer {
         // For Railway/headless: try to capture audio from PulseAudio
         if (useVirtualDisplay) {
           // Try to use PulseAudio to capture browser audio
-          // Use the monitor of the default sink to capture what's playing
+          // Use the monitor of our virtual sink (stream_sink.monitor)
+          const audioSource = audioDevice || 'stream_sink.monitor';
           inputOptions.push(
             '-f', 'pulse',
             '-ac', '2',
             '-ar', '44100',
-            '-i', audioDevice || 'default.monitor'
+            '-i', audioSource
           );
           // Note: This requires PulseAudio to be running
           // If it fails, FFmpeg will show an error but continue with video only
@@ -450,7 +573,18 @@ class WebStreamer {
       this.ffmpegProcess.on('close', (code: number) => {
         console.log(`FFmpeg process exited with code ${code}`);
         if (code !== 0 && code !== null) {
-          reject(new Error(`FFmpeg exited with code ${code}`));
+          // Check if it's an audio error and we're using virtual display
+          // If so, retry with silent audio
+          if (useVirtualDisplay) {
+            console.log('FFmpeg failed, may be audio issue. Retrying with silent audio...');
+            this.retryWithSilentAudio(rtmpsUrl, width, height, fps, useVirtualDisplay, lightweight)
+              .then(resolve)
+              .catch((retryError) => {
+                reject(new Error(`FFmpeg exited with code ${code}. Retry also failed: ${retryError.message}`));
+              });
+          } else {
+            reject(new Error(`FFmpeg exited with code ${code}`));
+          }
         }
       });
 
