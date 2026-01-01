@@ -1466,7 +1466,10 @@ class WebStreamer {
             );
           } else {
             // Use silent audio - ALSA hardware devices don't exist in containers
-            console.log('Using silent audio (no audio capture available)');
+            console.log('⚠ Using silent audio (no audio capture available)');
+            console.log('⚠ PulseAudio is not accessible in this container environment.');
+            console.log('⚠ Audio from the browser will not be captured.');
+            console.log('⚠ This is a known limitation in Docker/Railway containers.');
             inputOptions.push(
               '-f', 'lavfi',
               '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
