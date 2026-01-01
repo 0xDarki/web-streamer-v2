@@ -15,6 +15,8 @@ interface StreamConfig {
   clickX?: number;
   clickY?: number;
   clickDelay?: number;
+  streamWidth?: number;
+  streamHeight?: number;
 }
 
 class WebStreamer {
@@ -44,6 +46,8 @@ class WebStreamer {
       clickX,
       clickY,
       clickDelay = 1000,
+      streamWidth,
+      streamHeight,
     } = config;
 
     // Apply lightweight defaults if enabled
@@ -51,6 +55,11 @@ class WebStreamer {
     const finalWidth = width;
     const finalHeight = height;
     const finalFps = lightweight ? (fps === 30 ? 1 : fps) : fps;
+    
+    // Stream resolution (can be different from browser resolution)
+    // If not specified, use browser resolution
+    const streamWidthFinal = streamWidth !== undefined ? streamWidth : width;
+    const streamHeightFinal = streamHeight !== undefined ? streamHeight : height;
 
     // Determine if we need virtual display (always needed on Linux without DISPLAY)
     const useVirtualDisplay = configUseVirtualDisplay || 
@@ -215,7 +224,19 @@ class WebStreamer {
     }
 
     // Start FFmpeg streaming
-    await this.startFFmpegStream(rtmpsUrl, finalWidth, finalHeight, finalFps, audioDevice, videoDevice, useVirtualDisplay, lightweight);
+    // Browser is at finalWidth x finalHeight, but stream can be at different resolution
+    await this.startFFmpegStream(
+      rtmpsUrl, 
+      finalWidth, 
+      finalHeight, 
+      streamWidthFinal, 
+      streamHeightFinal,
+      finalFps, 
+      audioDevice, 
+      videoDevice, 
+      useVirtualDisplay, 
+      lightweight
+    );
 
     console.log('Stream started successfully!');
   }
@@ -355,8 +376,10 @@ class WebStreamer {
    */
   private async retryWithSilentAudio(
     rtmpsUrl: string,
-    width: number,
-    height: number,
+    captureWidth: number,
+    captureHeight: number,
+    streamWidth: number,
+    streamHeight: number,
     fps: number,
     useVirtualDisplay: boolean,
     lightweight: boolean
@@ -370,7 +393,7 @@ class WebStreamer {
       inputOptions = [
         '-f', 'x11grab',
         '-framerate', fps.toString(),
-        '-video_size', `${width}x${height}`,
+        '-video_size', `${captureWidth}x${captureHeight}`,
         '-i', videoInput,
         '-f', 'lavfi',
         '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
@@ -384,8 +407,13 @@ class WebStreamer {
       const audioSampleRate = lightweight ? '22050' : '44100';
       const gopSize = fps <= 1 ? fps.toString() : (2 * fps).toString();
 
+      // Scale video if stream resolution is different from capture resolution
+      const needsScaling = streamWidth !== captureWidth || streamHeight !== captureHeight;
+      const scaleFilter = needsScaling ? `scale=${streamWidth}:${streamHeight}` : null;
+
       const outputOptions = [
         '-c:v', 'libx264',
+        ...(scaleFilter ? ['-vf', scaleFilter] : []), // Add scale filter if needed
         '-preset', preset,
         '-tune', 'zerolatency',
         '-crf', crf,
@@ -434,7 +462,7 @@ class WebStreamer {
           if (useVirtualDisplay && !hasRetried) {
             hasRetried = true;
             console.log('Audio capture failed, retrying with silent audio...');
-            this.retryWithSilentAudio(rtmpsUrl, width, height, fps, useVirtualDisplay, lightweight)
+            this.retryWithSilentAudio(rtmpsUrl, captureWidth, captureHeight, streamWidth, streamHeight, fps, useVirtualDisplay, lightweight)
               .then(resolve)
               .catch((retryError) => {
                 reject(new Error(`FFmpeg exited with code ${code}. Retry also failed: ${retryError.message}`));
@@ -462,8 +490,10 @@ class WebStreamer {
    */
   private async startFFmpegStream(
     rtmpsUrl: string,
-    width: number,
-    height: number,
+    captureWidth: number,
+    captureHeight: number,
+    streamWidth: number,
+    streamHeight: number,
     fps: number,
     audioDevice?: string,
     videoDevice?: string,
@@ -485,19 +515,18 @@ class WebStreamer {
         inputOptions = [
           '-f', 'avfoundation',
           '-framerate', fps.toString(),
-          '-video_size', `${width}x${height}`,
+          '-video_size', `${captureWidth}x${captureHeight}`,
           '-i', `${videoInput}:${audioInput}`,
         ];
       } else if (platform === 'linux') {
         // Linux - use x11grab for video
-        // Capture from 0,0 (full screen including browser UI)
-        // The browser window should be positioned and sized correctly
+        // Capture from 0,0 at capture resolution (e.g., 1080p)
         const display = process.env.DISPLAY || ':0.0';
         videoInput = `${display}+0,0`;
         inputOptions = [
           '-f', 'x11grab',
           '-framerate', fps.toString(),
-          '-video_size', `${width}x${height}`,
+          '-video_size', `${captureWidth}x${captureHeight}`,
           '-i', videoInput,
         ];
 
@@ -527,7 +556,7 @@ class WebStreamer {
         inputOptions = [
           '-f', 'gdigrab',
           '-framerate', fps.toString(),
-          '-video_size', `${width}x${height}`,
+          '-video_size', `${captureWidth}x${captureHeight}`,
           '-i', 'desktop',
           '-f', 'dshow',
           '-i', audioDevice || 'audio="Stereo Mix (Realtek Audio)"',
@@ -596,7 +625,7 @@ class WebStreamer {
           // If so, retry with silent audio
           if (useVirtualDisplay) {
             console.log('FFmpeg failed, may be audio issue. Retrying with silent audio...');
-            this.retryWithSilentAudio(rtmpsUrl, width, height, fps, useVirtualDisplay, lightweight)
+            this.retryWithSilentAudio(rtmpsUrl, captureWidth, captureHeight, streamWidth, streamHeight, fps, useVirtualDisplay, lightweight)
               .then(resolve)
               .catch((retryError) => {
                 reject(new Error(`FFmpeg exited with code ${code}. Retry also failed: ${retryError.message}`));
@@ -705,8 +734,10 @@ async function main() {
     console.log('  RTMPS_URL - The RTMPS streaming endpoint');
     console.log('');
     console.log('Options:');
-    console.log('  --width <number>     Video width (default: 1920)');
-    console.log('  --height <number>    Video height (default: 1080)');
+    console.log('  --width <number>     Browser window width (default: 1920)');
+    console.log('  --height <number>    Browser window height (default: 1080)');
+    console.log('  --stream-width <n>   Stream output width (default: same as browser width)');
+    console.log('  --stream-height <n>  Stream output height (default: same as browser height)');
     console.log('  --fps <number>       Frame rate (default: 30, lightweight default: 1)');
     console.log('  --lightweight        Enable lightweight mode (optimized encoding, 1fps default)');
     console.log('  --click-selector <s> CSS selector to click (e.g., "button.play")');

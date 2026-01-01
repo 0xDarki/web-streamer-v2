@@ -44,14 +44,18 @@ npm start <webpage-url> <rtmps-url> [options]
 ```
 
 Options:
-- `--width <number>` - Video width in pixels (default: 1920)
-- `--height <number>` - Video height in pixels (default: 1080)
+- `--width <number>` - Browser window width in pixels (default: 1920)
+- `--height <number>` - Browser window height in pixels (default: 1080)
+- `--stream-width <number>` - Stream output width in pixels (default: same as browser width)
+- `--stream-height <number>` - Stream output height in pixels (default: same as browser height)
 - `--fps <number>` - Frame rate (default: 30, lightweight mode default: 1)
 - `--lightweight` - Enable lightweight mode (1920x1080 @ 1fps, optimized encoding)
 - `--click-selector <selector>` - CSS selector to click (e.g., `button.play`, `#play-button`)
 - `--click-x <number>` - X coordinate to click (requires `--click-y`)
 - `--click-y <number>` - Y coordinate to click (requires `--click-x`)
 - `--click-delay <ms>` - Delay after click in milliseconds (default: 1000)
+- `--stream-width <number>` - Stream output width (default: same as browser width)
+- `--stream-height <number>` - Stream output height (default: same as browser height)
 - `--audio-device <id>` - Audio device ID (macOS only)
 - `--video-device <id>` - Video device ID (macOS only)
 - `--list-devices` - List available audio/video devices (macOS only)
@@ -61,6 +65,9 @@ Options:
 ```bash
 # Stream with custom resolution
 npm start https://example.com rtmps://stream.example.com/live/key --width 1280 --height 720
+
+# Browser at 1080p, stream at 720p (saves CPU and bandwidth)
+npm start https://example.com rtmps://stream.example.com/live/key --width 1920 --height 1080 --stream-width 1280 --stream-height 720
 
 # Stream with custom frame rate
 npm start https://example.com rtmps://stream.example.com/live/key --fps 60
@@ -162,8 +169,10 @@ This application is configured to run on [Railway](https://railway.app), a cloud
    - `RTMPS_URL` - Your RTMPS streaming endpoint (e.g., `rtmps://stream.example.com/live/key`)
    
    **Optional:**
-   - `WIDTH` - Video width in pixels (default: 1920)
-   - `HEIGHT` - Video height in pixels (default: 1080)
+   - `WIDTH` - Browser window width in pixels (default: 1920)
+   - `HEIGHT` - Browser window height in pixels (default: 1080)
+   - `STREAM_WIDTH` - Stream output width in pixels (default: same as browser width)
+   - `STREAM_HEIGHT` - Stream output height in pixels (default: same as browser height)
    - `FPS` - Frame rate (default: 30, lightweight default: 1)
    - `LIGHTWEIGHT` - Set to `true` to enable lightweight mode (optimized encoding, 1fps default)
    
@@ -300,12 +309,18 @@ Based on Railway's pricing (as of 2024):
 
 1. **Use lightweight mode**: Enable `--lightweight` or `LIGHTWEIGHT=true` for 60-70% resource reduction
 2. **Lower resolution**: Reduce `WIDTH` and `HEIGHT` to decrease CPU/RAM usage
-3. **Lower frame rate**: Reduce `FPS` (e.g., 15fps instead of 30fps)
-4. **FFmpeg preset**: 
+3. **Separate browser and stream resolution**: Use `STREAM_WIDTH` and `STREAM_HEIGHT` to stream at lower resolution while keeping browser at full resolution
+   - **Example**: Browser at 1080p (`WIDTH=1920 HEIGHT=1080`) but stream at 720p (`STREAM_WIDTH=1280 STREAM_HEIGHT=720`)
+   - **Benefits**: 
+     - Browser renders at full quality (better text/UI visibility)
+     - Stream uses less bandwidth and CPU (30-40% reduction)
+     - Perfect for dashboards where you want full detail but lower stream cost
+4. **Lower frame rate**: Reduce `FPS` (e.g., 15fps instead of 30fps)
+5. **FFmpeg preset**: 
    - Lightweight mode uses `ultrafast` (lowest CPU)
    - Standard mode uses `veryfast` (good balance)
-5. **Block resources**: Lightweight mode automatically blocks images/fonts/stylesheets
-6. **Monitor resources**: Use Railway's metrics to track actual usage
+6. **Block resources**: Lightweight mode automatically blocks images/fonts/stylesheets
+7. **Monitor resources**: Use Railway's metrics to track actual usage
 
 ### Actual Usage Monitoring
 
@@ -327,6 +342,8 @@ railway variables set RTMPS_URL=rtmps://stream.example.com/live/key
 # Optional streaming settings
 railway variables set WIDTH=1920
 railway variables set HEIGHT=1080
+railway variables set STREAM_WIDTH=1280
+railway variables set STREAM_HEIGHT=720
 railway variables set FPS=30
 railway variables set LIGHTWEIGHT=true
 
@@ -370,6 +387,26 @@ FPS=1
 # Click to enable audio
 CLICK_SELECTOR=[aria-label='Play']
 CLICK_DELAY=2000
+```
+
+**Example 5: Browser at 1080p, Stream at 720p (Resource Optimization)**
+```bash
+# Required
+WEBPAGE_URL=https://example.com
+RTMPS_URL=rtmps://stream.example.com/live/key
+
+# Browser renders at full 1080p for better visibility
+WIDTH=1920
+HEIGHT=1080
+
+# Stream outputs at 720p to save CPU and bandwidth (30-40% reduction)
+STREAM_WIDTH=1280
+STREAM_HEIGHT=720
+
+# Benefits:
+# - Browser UI is clear and readable at 1080p
+# - Stream uses less CPU and bandwidth
+# - Perfect for dashboards and monitoring pages
 ```
 
 **Note:** When setting `CLICK_SELECTOR` in Railway:
