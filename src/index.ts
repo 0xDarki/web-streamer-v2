@@ -765,13 +765,22 @@ class WebStreamer {
         // In containers, we need to use --daemonize without --start
         try {
           // Try using execSync with --daemonize first (works in containers)
-          execSync('pulseaudio --exit-idle-time=-1 --system=false --disallow-exit --daemonize', {
+          const startOutput = execSync('pulseaudio --exit-idle-time=-1 --system=false --disallow-exit --daemonize 2>&1', {
             env: pulseEnv,
-            stdio: 'pipe',
+            encoding: 'utf8',
             timeout: 5000
           });
+          if (startOutput && startOutput.trim()) {
+            console.log(`PulseAudio start output: ${startOutput.trim()}`);
+          }
           console.log('✓ PulseAudio daemon started via execSync (--daemonize)');
         } catch (e: any) {
+          if (e.stdout) {
+            console.log(`PulseAudio start stdout: ${e.stdout.toString()}`);
+          }
+          if (e.stderr) {
+            console.log(`PulseAudio start stderr: ${e.stderr.toString()}`);
+          }
           // If --daemonize doesn't work, try with --start
           console.log('pulseaudio --daemonize failed, trying --start...');
           try {
@@ -1384,26 +1393,30 @@ class WebStreamer {
             console.warn('Could not setup audio routing:', e);
           }
           
-          // Try to use PulseAudio first, but fallback to ALSA if PulseAudio is not accessible
+          // Try to use PulseAudio first, but fallback to silent audio if PulseAudio is not accessible
+          // In containers, ALSA hardware devices usually don't exist, so we skip ALSA
           let usePulseAudio = false;
           try {
             const pulseEnv = this.getPulseEnv();
             execSync('pactl info > /dev/null 2>&1', { 
               env: pulseEnv,
-              stdio: 'ignore' 
+              stdio: 'ignore',
+              timeout: 1000
             });
             // Check if stream_sink.monitor exists
             try {
               execSync('pactl list sources | grep -q "stream_sink.monitor"', { 
                 env: pulseEnv,
-                stdio: 'ignore' 
+                stdio: 'ignore',
+                timeout: 1000
               });
               usePulseAudio = true;
+              console.log('✓ PulseAudio is accessible and stream_sink.monitor exists');
             } catch (e) {
-              console.warn('stream_sink.monitor not found, will use ALSA instead');
+              console.warn('stream_sink.monitor not found, will use silent audio');
             }
           } catch (e) {
-            console.warn('PulseAudio not accessible, will use ALSA instead');
+            console.warn('PulseAudio not accessible, will use silent audio');
           }
           
           if (usePulseAudio) {
@@ -1416,13 +1429,11 @@ class WebStreamer {
               '-i', audioSource
             );
           } else {
-            // Use ALSA directly - this works even without PulseAudio
-            console.log('Capturing audio from ALSA: hw:0,0');
+            // Use silent audio - ALSA hardware devices don't exist in containers
+            console.log('Using silent audio (no audio capture available)');
             inputOptions.push(
-              '-f', 'alsa',
-              '-ac', '2',
-              '-ar', '44100',
-              '-i', 'hw:0,0',
+              '-f', 'lavfi',
+              '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
             );
           }
         } else {
