@@ -658,14 +658,29 @@ class WebStreamer {
   private async startPulseAudio(): Promise<void> {
     return new Promise((resolve) => {
       console.log('Starting PulseAudio for audio capture...');
-      
-      // Start PulseAudio daemon
+
+      // Start PulseAudio daemon with explicit socket path
+      // Use --daemonize to run in background, but capture stderr to see errors
       this.pulseAudioProcess = spawn('pulseaudio', [
         '--start',
         '--exit-idle-time=-1',
         '--system=false',
         '--disallow-exit',
-      ]);
+      ], {
+        env: {
+          ...process.env,
+          PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
+          PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
+        }
+      });
+      
+      // Capture PulseAudio output for debugging
+      this.pulseAudioProcess.stderr?.on('data', (data: Buffer) => {
+        const output = data.toString();
+        if (output.includes('error') || output.includes('Error') || output.includes('failed')) {
+          console.warn(`PulseAudio stderr: ${output}`);
+        }
+      });
 
       this.pulseAudioProcess.on('error', (error) => {
         console.warn(`PulseAudio start warning: ${error.message}`);
@@ -975,68 +990,85 @@ class WebStreamer {
             // Try to create an ALSA source to capture system audio and route it to stream_sink
             console.log('Browser may be using ALSA directly. Creating ALSA source...');
             
+            // First, verify PulseAudio is running and accessible
             try {
-              // First, try to create an ALSA source from the default ALSA device
-              // This will capture audio from ALSA and make it available in PulseAudio
-              exec('pactl load-module module-alsa-source device=hw:0,0 source_name=alsa_source', (alsaError: any, alsaStdout: any) => {
-                if (!alsaError && alsaStdout) {
-                  const alsaId = alsaStdout.toString().trim();
-                  console.log(`✓ ALSA source created (module ID: ${alsaId}) - capturing from hw:0,0`);
-                  
-                  // Wait a moment for the source to be ready
-                  setTimeout(() => {
-                    // Route the ALSA source to stream_sink via loopback
-                    exec('pactl load-module module-loopback source=alsa_source sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
-                      if (!loopbackError && loopbackStdout) {
-                        const loopbackId = loopbackStdout.toString().trim();
-                        console.log(`✓ Loopback created (module ID: ${loopbackId}) - routing alsa_source to stream_sink`);
-                      } else {
-                        console.warn('Could not create loopback from ALSA source');
-                      }
-                    });
-                  }, 1000);
-                } else {
-                  console.warn('Could not create ALSA source, trying alternative method...');
-                  
-                  // Alternative: Try to create loopback from all available sources
-                  try {
-                    const allSources = execSync('pactl list sources short | cut -f2', { encoding: 'utf8' }).trim().split('\n');
-                    console.log(`Available sources: ${allSources.join(', ')}`);
+              execSync('pulseaudio --check', { stdio: 'ignore' });
+              console.log('✓ PulseAudio is running');
+            } catch (e) {
+              console.error('✗ PulseAudio is not running! Cannot create ALSA source.');
+              console.warn('Audio capture will likely fail');
+            }
+            
+            // Wait a bit for PulseAudio to be fully ready
+            setTimeout(() => {
+              try {
+                // First, try to create an ALSA source from the default ALSA device
+                // This will capture audio from ALSA and make it available in PulseAudio
+                exec('pactl load-module module-alsa-source device=hw:0,0 source_name=alsa_source', (alsaError: any, alsaStdout: any) => {
+                  if (!alsaError && alsaStdout) {
+                    const alsaId = alsaStdout.toString().trim();
+                    console.log(`✓ ALSA source created (module ID: ${alsaId}) - capturing from hw:0,0`);
                     
-                    // Try to create loopback from each source to stream_sink
-                    allSources.forEach((source: string) => {
-                      if (source.includes('.monitor') && !source.includes('stream_sink')) {
-                        exec(`pactl load-module module-loopback source=${source} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
-                          if (!loopbackError && loopbackStdout) {
-                            const loopbackId = loopbackStdout.toString().trim();
-                            console.log(`Loopback created (module ID: ${loopbackId}) - routing ${source} to stream_sink`);
-                          }
-                        });
-                      }
-                    });
+                    // Wait a moment for the source to be ready
+                    setTimeout(() => {
+                      // Route the ALSA source to stream_sink via loopback
+                      exec('pactl load-module module-loopback source=alsa_source sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
+                        if (!loopbackError && loopbackStdout) {
+                          const loopbackId = loopbackStdout.toString().trim();
+                          console.log(`✓ Loopback created (module ID: ${loopbackId}) - routing alsa_source to stream_sink`);
+                        } else {
+                          console.warn('Could not create loopback from ALSA source');
+                        }
+                      });
+                    }, 1000);
+                  } else {
+                    console.warn('Could not create ALSA source:', alsaError?.message || 'Unknown error');
+                    console.warn('Trying alternative method...');
                     
-                    // Also try to create loopback from default source
+                    // Alternative: Try to create loopback from all available sources
                     try {
-                      const defaultSource = execSync('pactl info | grep "Default Source" | cut -d: -f2 | xargs', { encoding: 'utf8' }).trim();
-                      if (defaultSource && !defaultSource.includes('stream_sink')) {
-                        exec(`pactl load-module module-loopback source=${defaultSource} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
-                          if (!loopbackError && loopbackStdout) {
-                            const loopbackId = loopbackStdout.toString().trim();
-                            console.log(`Loopback from default source created (module ID: ${loopbackId}) - routing ${defaultSource} to stream_sink`);
+                      const allSources = execSync('pactl list sources short 2>/dev/null | cut -f2', { encoding: 'utf8' }).trim().split('\n').filter((s: string) => s);
+                      if (allSources.length > 0) {
+                        console.log(`Available sources: ${allSources.join(', ')}`);
+                        
+                        // Try to create loopback from each source to stream_sink
+                        allSources.forEach((source: string) => {
+                          if (source.includes('.monitor') && !source.includes('stream_sink')) {
+                            exec(`pactl load-module module-loopback source=${source} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                              if (!loopbackError && loopbackStdout) {
+                                const loopbackId = loopbackStdout.toString().trim();
+                                console.log(`Loopback created (module ID: ${loopbackId}) - routing ${source} to stream_sink`);
+                              }
+                            });
                           }
                         });
+                        
+                        // Also try to create loopback from default source
+                        try {
+                          const defaultSource = execSync('pactl info 2>/dev/null | grep "Default Source" | cut -d: -f2 | xargs', { encoding: 'utf8' }).trim();
+                          if (defaultSource && !defaultSource.includes('stream_sink')) {
+                            exec(`pactl load-module module-loopback source=${defaultSource} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                              if (!loopbackError && loopbackStdout) {
+                                const loopbackId = loopbackStdout.toString().trim();
+                                console.log(`Loopback from default source created (module ID: ${loopbackId}) - routing ${defaultSource} to stream_sink`);
+                              }
+                            });
+                          }
+                        } catch (e) {
+                          console.warn('Could not get default source');
+                        }
+                      } else {
+                        console.warn('No sources available in PulseAudio');
                       }
                     } catch (e) {
-                      console.warn('Could not get default source');
+                      console.warn('Could not list sources for loopback:', e);
                     }
-                  } catch (e) {
-                    console.warn('Could not list sources for loopback');
                   }
-                }
-              });
-            } catch (e) {
-              console.warn('Could not setup ALSA source:', e);
-            }
+                });
+              } catch (e) {
+                console.warn('Could not setup ALSA source:', e);
+              }
+            }, 2000); // Wait 2 seconds for PulseAudio to be ready
           } catch (e) {
             console.warn('Could not setup audio routing:', e);
           }
