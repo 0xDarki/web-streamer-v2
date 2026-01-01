@@ -76,11 +76,11 @@ class WebStreamer {
     const browserArgs = [
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=' + finalWidth + ',' + finalHeight,
-      '--start-fullscreen',
-      '--kiosk', // Kiosk mode - hides browser UI completely
+      '--start-maximized',
       '--window-position=0,0', // Position window at top-left
       '--disable-infobars', // Hide info bars
       '--disable-session-crashed-bubble', // Hide crash notifications
+      // Note: Using --app mode would load URL automatically, but we'll navigate manually for better control
       // Set PulseAudio sink for browser audio (if using virtual display)
       ...(useVirtualDisplay && process.platform === 'linux' 
         ? ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
@@ -144,12 +144,15 @@ class WebStreamer {
 
     // When using virtual display, we need headless: false so browser renders to X display
     // FFmpeg will capture from the virtual display
+    // Use app mode to hide browser UI - launch with URL directly
     this.browser = await puppeteer.launch({
       headless: false,
-      args: browserArgs,
+      args: [...browserArgs, `--app=${url}`], // App mode hides browser UI
     });
 
-    this.page = await this.browser.newPage();
+    // In app mode, the page is already loaded, so get it
+    const pages = await this.browser.pages();
+    this.page = pages[0] || await this.browser.newPage();
     await this.page.setViewport({ width: finalWidth, height: finalHeight });
 
     // Lightweight optimizations: block some resources but keep stylesheets for design
@@ -167,12 +170,20 @@ class WebStreamer {
       });
     }
 
-    // Navigate to the webpage
-    console.log(`Navigating to ${url}...`);
-    await this.page.goto(url, { 
-      waitUntil: lightweight ? 'domcontentloaded' : 'networkidle2',
-      timeout: lightweight ? 10000 : 30000 
-    });
+    // In app mode, page is already loaded, just wait for it to be ready
+    const currentUrl = this.page.url();
+    if (currentUrl && currentUrl !== 'about:blank' && currentUrl.includes(url.split('?')[0])) {
+      console.log(`Page already loaded in app mode (no browser UI)`);
+      // Wait for page to be fully ready
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    } else {
+      // Navigate to the webpage (fallback if app mode didn't work)
+      console.log(`Navigating to ${url}...`);
+      await this.page.goto(url, { 
+        waitUntil: lightweight ? 'domcontentloaded' : 'networkidle2',
+        timeout: lightweight ? 10000 : 30000 
+      });
+    }
 
     // Wait a bit for page to fully load (less time in lightweight mode)
     await new Promise((resolve) => setTimeout(resolve, lightweight ? 1000 : 2000));
@@ -479,6 +490,8 @@ class WebStreamer {
         ];
       } else if (platform === 'linux') {
         // Linux - use x11grab for video
+        // Capture from 0,0 (full screen including browser UI)
+        // The browser window should be positioned and sized correctly
         const display = process.env.DISPLAY || ':0.0';
         videoInput = `${display}+0,0`;
         inputOptions = [
