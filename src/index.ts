@@ -70,6 +70,8 @@ class WebStreamer {
     const browserArgs = [
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=' + finalWidth + ',' + finalHeight,
+      '--start-maximized',
+      '--kiosk', // Kiosk mode hides browser UI
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -137,13 +139,14 @@ class WebStreamer {
     this.page = await this.browser.newPage();
     await this.page.setViewport({ width: finalWidth, height: finalHeight });
 
-    // Lightweight optimizations: block images and other resources
+    // Lightweight optimizations: block some resources but keep stylesheets for design
     if (lightweight) {
       await this.page.setRequestInterception(true);
       this.page.on('request', (req) => {
         const resourceType = req.resourceType();
-        // Block images, fonts, stylesheets, media (keep only essential: document, script, xhr, fetch)
-        if (['image', 'font', 'stylesheet', 'media'].includes(resourceType)) {
+        // Block images and media, but keep stylesheets, fonts, and essential resources
+        // This ensures the web design is visible while reducing load
+        if (['image', 'media'].includes(resourceType)) {
           req.abort().catch(() => {}); // Ignore errors
         } else {
           req.continue().catch(() => {}); // Ignore errors
