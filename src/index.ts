@@ -229,7 +229,12 @@ class WebStreamer {
 
     // Perform click action if specified (to enable audio playback)
     if (clickSelector || (clickX !== undefined && clickY !== undefined)) {
-      await this.performClick(clickSelector, clickX, clickY, clickDelay);
+      // Wait a bit more in lightweight mode for page to be ready
+      if (lightweight) {
+        console.log('Waiting for page to be fully ready before clicking...');
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+      await this.performClick(clickSelector, clickX, clickY, clickDelay, lightweight);
     }
 
     // After click, wait for audio to start and verify it's in stream_sink
@@ -394,7 +399,8 @@ class WebStreamer {
     selector?: string,
     x?: number,
     y?: number,
-    delay: number = 1000
+    delay: number = 1000,
+    lightweight: boolean = false
   ): Promise<void> {
     if (!this.page) {
       throw new Error('Page not initialized');
@@ -403,9 +409,40 @@ class WebStreamer {
     try {
       if (selector) {
         console.log(`Clicking element with selector: ${selector}`);
-        await this.page.waitForSelector(selector, { timeout: 5000 });
-        await this.page.click(selector);
-        console.log('Click performed successfully');
+        
+        // Wait longer in lightweight mode as page loads slower
+        const timeout = lightweight ? 30000 : 10000;
+        console.log(`Waiting for selector (timeout: ${timeout}ms)...`);
+        
+        // Try multiple methods to find the element
+        try {
+          await this.page.waitForSelector(selector, { timeout, visible: true });
+        } catch (e) {
+          // If visible fails, try without visible requirement
+          console.log('Element not visible, trying without visibility requirement...');
+          await this.page.waitForSelector(selector, { timeout: timeout / 2 });
+        }
+        
+        // Try to click, with retry
+        let clicked = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await this.page.click(selector);
+            clicked = true;
+            break;
+          } catch (e) {
+            if (attempt < 2) {
+              console.log(`Click attempt ${attempt + 1} failed, retrying...`);
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+            } else {
+              throw e;
+            }
+          }
+        }
+        
+        if (clicked) {
+          console.log('Click performed successfully');
+        }
       } else if (x !== undefined && y !== undefined) {
         console.log(`Clicking at coordinates: (${x}, ${y})`);
         await this.page.mouse.click(x, y);
