@@ -76,8 +76,11 @@ class WebStreamer {
     const browserArgs = [
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=' + finalWidth + ',' + finalHeight,
-      '--start-maximized',
+      '--start-fullscreen',
+      '--kiosk', // Kiosk mode - hides browser UI completely
       '--window-position=0,0', // Position window at top-left
+      '--disable-infobars', // Hide info bars
+      '--disable-session-crashed-bubble', // Hide crash notifications
       // Set PulseAudio sink for browser audio (if using virtual display)
       ...(useVirtualDisplay && process.platform === 'linux' 
         ? ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream']
@@ -173,6 +176,9 @@ class WebStreamer {
 
     // Wait a bit for page to fully load (less time in lightweight mode)
     await new Promise((resolve) => setTimeout(resolve, lightweight ? 1000 : 2000));
+
+    // Kiosk mode should already hide browser UI completely
+    // The --kiosk flag removes all browser chrome (tabs, address bar, etc.)
 
     // Perform click action if specified (to enable audio playback)
     if (clickSelector || (clickX !== undefined && clickY !== undefined)) {
