@@ -179,17 +179,29 @@ class WebStreamer {
     this.page = pages[0] || await this.browser.newPage();
     await this.page.setViewport({ width: finalWidth, height: finalHeight });
 
-    // Lightweight optimizations: block some resources but keep stylesheets for design
+    // Lightweight optimizations: block some resources but keep stylesheets, fonts, and audio for design and sound
     if (lightweight) {
       await this.page.setRequestInterception(true);
       this.page.on('request', (req) => {
         const resourceType = req.resourceType();
-        // Block images and media, but keep stylesheets, fonts, and essential resources
-        // This ensures the web design is visible while reducing load
-        if (['image', 'media'].includes(resourceType)) {
-          req.abort().catch(() => {}); // Ignore errors
+        const url = req.url();
+        
+        // Block images and video, but keep:
+        // - stylesheets (for design)
+        // - fonts (for text rendering)
+        // - media/audio files (for sound - check if it's audio)
+        // This ensures the web design is visible and audio works while reducing load
+        
+        // Check if it's an audio file by extension or MIME type
+        const isAudio = url.match(/\.(mp3|wav|ogg|aac|m4a|flac|opus|webm)(\?|$)/i) || 
+                       req.headers()['content-type']?.match(/audio\//i);
+        
+        if (resourceType === 'image') {
+          req.abort().catch(() => {}); // Block images
+        } else if (resourceType === 'media' && !isAudio) {
+          req.abort().catch(() => {}); // Block video but allow audio
         } else {
-          req.continue().catch(() => {}); // Ignore errors
+          req.continue().catch(() => {}); // Allow everything else (including audio)
         }
       });
     }
