@@ -36,7 +36,7 @@ class WebStreamer {
       fps = 30,
       audioDevice,
       videoDevice,
-      useVirtualDisplay = process.platform === 'linux' || process.env.RAILWAY_ENVIRONMENT !== undefined,
+      useVirtualDisplay: configUseVirtualDisplay = false,
       lightweight = process.env.LIGHTWEIGHT === 'true',
       clickSelector,
       clickX,
@@ -49,6 +49,11 @@ class WebStreamer {
     const finalWidth = width;
     const finalHeight = height;
     const finalFps = lightweight ? (fps === 30 ? 1 : fps) : fps;
+
+    // Determine if we need virtual display (always needed on Linux without DISPLAY)
+    const useVirtualDisplay = configUseVirtualDisplay || 
+                             (process.platform === 'linux' && !process.env.DISPLAY) ||
+                             (process.platform === 'linux' && process.env.DISPLAY === ':99');
 
     console.log(`Starting stream: ${url} -> ${rtmpsUrl}`);
     console.log(`Platform: ${process.platform}, Virtual display: ${useVirtualDisplay}, Lightweight: ${lightweight}`);
@@ -522,7 +527,7 @@ async function main() {
     audioDevice: audioDeviceIndex !== -1 ? args[audioDeviceIndex + 1] : undefined,
     videoDevice: videoDeviceIndex !== -1 ? args[videoDeviceIndex + 1] : undefined,
     useVirtualDisplay: process.env.USE_VIRTUAL_DISPLAY === 'true' || 
-                       (process.platform === 'linux' && !process.env.DISPLAY),
+                       (process.platform === 'linux' && (!process.env.DISPLAY || process.env.DISPLAY === ':99')),
     lightweight,
   };
 
