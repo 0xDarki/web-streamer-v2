@@ -222,34 +222,87 @@ class WebStreamer {
 
     // After click, move browser audio to stream_sink using pactl
     if (useVirtualDisplay && process.platform === 'linux') {
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait for audio to start
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait for audio to start
       
       // Find Chrome/Chromium process and move its audio to stream_sink
       const { exec } = require('child_process');
       
-      // Try multiple methods to move audio to stream_sink
-      const moveAudio = () => {
-        // Method 1: Find by process name
-        exec('pactl list sink-inputs | grep -B2 "Chromium\\|chrome\\|Google Chrome" | grep "Sink Input" | cut -d# -f2 | head -1 | xargs -I {} pactl move-sink-input {} stream_sink 2>/dev/null', (error: any) => {
-          if (!error) {
-            console.log('Browser audio moved to stream_sink (method 1)');
-          } else {
-            // Method 2: Move all sink inputs to stream_sink
-            exec('pactl list short sink-inputs | cut -f1 | xargs -I {} pactl move-sink-input {} stream_sink 2>/dev/null', (error2: any) => {
-              if (!error2) {
-                console.log('All audio moved to stream_sink (method 2)');
+      // Wait for audio to be moved to stream_sink before starting FFmpeg
+      await new Promise<void>((resolve) => {
+        let attempts = 0;
+        const maxAttempts = 10;
+        
+        const moveAudio = (): Promise<boolean> => {
+          return new Promise((resolveMove) => {
+            // Method 1: Find by process name and move
+            exec('pactl list sink-inputs | grep -B2 "Chromium\\|chrome\\|Google Chrome" | grep "Sink Input" | cut -d# -f2 | head -1', (error: any, stdout: any) => {
+              if (!error && stdout && stdout.trim()) {
+                const sinkInputId = stdout.trim();
+                exec(`pactl move-sink-input ${sinkInputId} stream_sink`, (moveError: any) => {
+                  if (!moveError) {
+                    console.log(`Browser audio moved to stream_sink (sink-input: ${sinkInputId})`);
+                    resolveMove(true);
+                  } else {
+                    // Method 2: Move all sink inputs to stream_sink
+                    exec('pactl list short sink-inputs | cut -f1', (error2: any, stdout2: any) => {
+                      if (!error2 && stdout2 && stdout2.trim()) {
+                        const inputIds = stdout2.trim().split('\n').filter((id: string) => id);
+                        if (inputIds.length > 0) {
+                          exec(`pactl move-sink-input ${inputIds[0]} stream_sink`, (moveError2: any) => {
+                            if (!moveError2) {
+                              console.log(`All audio moved to stream_sink (sink-input: ${inputIds[0]})`);
+                              resolveMove(true);
+                            } else {
+                              resolveMove(false);
+                            }
+                          });
+                        } else {
+                          resolveMove(false);
+                        }
+                      } else {
+                        resolveMove(false);
+                      }
+                    });
+                  }
+                });
               } else {
-                console.warn('Could not move audio to stream_sink, audio may not be captured');
+                // No sink input found yet, try again
+                resolveMove(false);
               }
             });
+          });
+        };
+        
+        const tryMoveAudio = async () => {
+          attempts++;
+          const success = await moveAudio();
+          
+          if (success) {
+            // Verify audio is in stream_sink
+            exec('pactl list sink-inputs | grep -A5 "stream_sink" | grep "Sink Input"', (error: any, stdout: any) => {
+              if (!error && stdout && stdout.trim()) {
+                console.log('Audio confirmed in stream_sink, ready for FFmpeg');
+                resolve();
+              } else if (attempts < maxAttempts) {
+                setTimeout(tryMoveAudio, 1000);
+              } else {
+                console.warn('Audio may not be in stream_sink, but continuing anyway');
+                resolve();
+              }
+            });
+          } else if (attempts < maxAttempts) {
+            setTimeout(tryMoveAudio, 1000);
+          } else {
+            console.warn('Could not move audio to stream_sink after multiple attempts');
+            resolve();
           }
-        });
-      };
+        };
+        
+        tryMoveAudio();
+      });
       
-      // Try immediately and after a delay
-      moveAudio();
-      setTimeout(moveAudio, 2000);
-      setTimeout(moveAudio, 5000);
+      // Additional wait to ensure audio is playing
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 
     // Additional wait to ensure page is fully rendered before capturing
@@ -599,13 +652,28 @@ class WebStreamer {
           // Try to use PulseAudio to capture browser audio
           // Use the monitor of our virtual sink (stream_sink.monitor)
           const audioSource = audioDevice || 'stream_sink.monitor';
+          
+          // Verify sink and monitor exist before trying to capture
+          const { execSync } = require('child_process');
+          try {
+            execSync('pactl list sinks | grep -q "stream_sink"', { stdio: 'ignore' });
+            execSync('pactl list sources | grep -q "stream_sink.monitor"', { stdio: 'ignore' });
+            console.log('stream_sink and monitor exist, capturing audio from stream_sink.monitor');
+            
+            // Also verify there's audio in the sink
+            const sinkInputs = execSync('pactl list sink-inputs | grep -c "Sink Input" || echo "0"', { encoding: 'utf8' }).trim();
+            console.log(`Found ${sinkInputs} sink input(s) in PulseAudio`);
+          } catch (e) {
+            console.warn('stream_sink or monitor not found, audio may not be captured');
+          }
+          
           inputOptions.push(
             '-f', 'pulse',
             '-ac', '2',
             '-ar', '44100',
             '-i', audioSource
           );
-          // Note: This requires PulseAudio to be running
+          // Note: This requires PulseAudio to be running and stream_sink to exist
           // If it fails, FFmpeg will show an error but continue with video only
         } else {
           // Try to use pulse audio if available
