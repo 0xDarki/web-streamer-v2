@@ -441,31 +441,73 @@ class WebStreamer {
         }
         
         if (!elementFound) {
-          // Last attempt: try to find any element with aria-label containing "Play"
+          // Last attempt: try to find any element with aria-label containing "Play" or any button/clickable element
           try {
             console.log('Trying to find any element with aria-label containing "Play"...');
-            const playElements = await this.page.$$eval('[aria-label*="Play"], [aria-label*="play"]', (elements) => {
+            const playElements = await this.page.$$eval('[aria-label*="Play"], [aria-label*="play"], [aria-label*="PLAY"]', (elements) => {
               return elements.map((el, i) => ({
                 index: i,
                 ariaLabel: el.getAttribute('aria-label'),
                 tagName: el.tagName,
                 id: el.id,
-                className: el.className
+                className: el.className,
+                textContent: (el as any).textContent?.substring(0, 50) || ''
               }));
             });
             
             if (playElements.length > 0) {
               console.log(`Found ${playElements.length} element(s) with aria-label containing "Play":`);
               playElements.forEach((el: any) => {
-                console.log(`  - ${el.tagName}${el.id ? '#' + el.id : ''}${el.className ? '.' + el.className.split(' ')[0] : ''} (aria-label: "${el.ariaLabel}")`);
+                console.log(`  - ${el.tagName}${el.id ? '#' + el.id : ''}${el.className ? '.' + el.className.split(' ')[0] : ''} (aria-label: "${el.ariaLabel}", text: "${el.textContent}")`);
               });
               
               // Try to click the first one
               foundSelector = '[aria-label*="Play"]';
               elementFound = true;
+            } else {
+              // Try to find ALL elements with aria-label to see what's available
+              console.log('No elements with "Play" found. Searching for all elements with aria-label...');
+              const allAriaElements = await this.page.$$eval('[aria-label]', (elements) => {
+                return elements.map((el, i) => ({
+                  index: i,
+                  ariaLabel: el.getAttribute('aria-label'),
+                  tagName: el.tagName,
+                  id: el.id,
+                  className: el.className,
+                  textContent: (el as any).textContent?.substring(0, 50) || ''
+                }));
+              });
+              
+              if (allAriaElements.length > 0) {
+                console.log(`Found ${allAriaElements.length} element(s) with aria-label:`);
+                allAriaElements.slice(0, 10).forEach((el: any) => {
+                  console.log(`  - ${el.tagName}${el.id ? '#' + el.id : ''}${el.className ? '.' + el.className.split(' ')[0] : ''} (aria-label: "${el.ariaLabel}", text: "${el.textContent}")`);
+                });
+              }
+              
+              // Also try to find buttons or clickable elements
+              console.log('Searching for buttons and clickable elements...');
+              const buttons = await this.page.$$eval('button, [role="button"], [onclick], a[href]', (elements) => {
+                return elements.slice(0, 20).map((el, i) => ({
+                  index: i,
+                  tagName: el.tagName,
+                  id: el.id,
+                  className: el.className,
+                  textContent: (el as any).textContent?.substring(0, 50) || '',
+                  ariaLabel: el.getAttribute('aria-label') || ''
+                }));
+              });
+              
+              if (buttons.length > 0) {
+                console.log(`Found ${buttons.length} button/clickable element(s):`);
+                buttons.forEach((el: any) => {
+                  const label = el.ariaLabel || el.textContent || 'no label';
+                  console.log(`  - ${el.tagName}${el.id ? '#' + el.id : ''}${el.className ? '.' + el.className.split(' ')[0] : ''} (label: "${label}")`);
+                });
+              }
             }
           } catch (e) {
-            console.warn('Could not find elements with aria-label containing "Play"');
+            console.warn('Could not search for elements:', e);
           }
         }
         
