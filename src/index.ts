@@ -936,79 +936,57 @@ class WebStreamer {
         // For Railway/headless: try to capture audio from PulseAudio
         if (useVirtualDisplay) {
           // Try to use PulseAudio to capture browser audio
-          // Use the monitor of our virtual sink (stream_sink.monitor)
-          const audioSource = audioDevice || 'stream_sink.monitor';
-          
-          // Verify sink and monitor exist before trying to capture
+          // Since browser may not create sink input, try to capture from default sink monitor
+          // or use combine-sink to route all audio to stream_sink
           const { execSync, exec } = require('child_process');
           
-          // Check if sink exists
+          // Strategy: Since browser may not create sink input, we'll use module-null-sink differently
+          // Create a loopback from all possible sources to stream_sink
           try {
-            execSync('pactl list sinks | grep -q "stream_sink"', { stdio: 'ignore' });
-            console.log('✓ stream_sink exists');
-          } catch (e) {
-            console.error('✗ stream_sink not found!');
-            console.warn('Audio capture will likely fail');
-          }
-          
-          // Check if monitor exists - try multiple methods
-          let monitorFound = false;
-          try {
-            // Method 1: Check in sources short list
-            const monitorCheck = execSync('pactl list sources short 2>/dev/null | grep "stream_sink.monitor"', { encoding: 'utf8' }).trim();
-            if (monitorCheck) {
-              const monitorName = monitorCheck.split(/\s+/)[1] || 'stream_sink.monitor';
-              console.log(`✓ Monitor found: ${monitorName}`);
-              monitorFound = true;
-            }
-          } catch (e) {
-            // Method 2: Check in full sources list
+            // Get all available sinks
+            const allSinks = execSync('pactl list sinks short | cut -f2', { encoding: 'utf8' }).trim().split('\n');
+            console.log(`Available sinks: ${allSinks.join(', ')}`);
+            
+            // Get default sink
+            let defaultSink = 'auto_null';
             try {
-              execSync('pactl list sources | grep -q "stream_sink.monitor"', { stdio: 'ignore' });
-              console.log('✓ Monitor stream_sink.monitor exists (verified via full list)');
-              monitorFound = true;
-            } catch (e2) {
-              console.warn('✗ Monitor stream_sink.monitor not found');
-              console.warn('This may be a PulseAudio configuration issue');
-            }
-          }
-          
-          if (!monitorFound) {
-            console.warn('Monitor not found - trying to list all sources for debugging:');
-            try {
-              const allSources = execSync('pactl list sources short 2>/dev/null', { encoding: 'utf8' });
-              console.log('Available sources:');
-              console.log(allSources);
+              defaultSink = execSync('pactl info | grep "Default Sink" | cut -d: -f2 | xargs', { encoding: 'utf8' }).trim();
+              console.log(`Default sink: ${defaultSink}`);
             } catch (e) {
-              console.warn('Could not list sources');
+              console.warn('Could not get default sink, using auto_null');
             }
+            
+            // Create loopback from default sink monitor to stream_sink
+            // This routes any audio captured from default sink to stream_sink
+            if (defaultSink !== 'stream_sink' && defaultSink !== 'auto_null') {
+              exec(`pactl load-module module-loopback source=${defaultSink}.monitor sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                if (!loopbackError && loopbackStdout) {
+                  const loopbackId = loopbackStdout.toString().trim();
+                  console.log(`Loopback created (module ID: ${loopbackId}) - routing ${defaultSink}.monitor to stream_sink`);
+                } else {
+                  console.warn('Could not create loopback from default sink');
+                }
+              });
+            }
+            
+            // Also try to create combine-sink as backup
+            if (defaultSink !== 'stream_sink' && defaultSink !== 'auto_null') {
+              exec('pactl load-module module-combine-sink sink_name=combined_sink slaves=' + defaultSink + ',stream_sink', (combineError: any, combineStdout: any) => {
+                if (!combineError && combineStdout) {
+                  const combineId = combineStdout.toString().trim();
+                  console.log(`Combine-sink created (module ID: ${combineId}) - combining ${defaultSink} with stream_sink`);
+                  exec('pactl set-default-sink combined_sink', () => {});
+                }
+              });
+            }
+          } catch (e) {
+            console.warn('Could not setup audio routing:', e);
           }
           
-          // Check for audio in sink
-          exec('pactl list sink-inputs 2>/dev/null', (error: any, stdout: any) => {
-            if (!error && stdout && stdout.trim()) {
-              const hasStreamSink = stdout.includes('stream_sink');
-              if (hasStreamSink) {
-                console.log('✓ Audio found in stream_sink');
-                // Show details
-                const sinkInputSection = stdout.split('Sink Input #').find((section: string) => section.includes('stream_sink'));
-                if (sinkInputSection) {
-                  const lines = sinkInputSection.split('\n').slice(0, 5);
-                  console.log('Audio details:');
-                  lines.forEach((line: string) => console.log(`  ${line.trim()}`));
-                }
-              } else {
-                console.warn('No audio in stream_sink yet');
-                if (stdout.includes('Sink Input')) {
-                  console.log('But there are sink inputs elsewhere:');
-                  const inputCount = (stdout.match(/Sink Input #/g) || []).length;
-                  console.log(`  Found ${inputCount} sink input(s) in other sinks`);
-                }
-              }
-            } else {
-              console.warn('No sink inputs found at all - audio may not be playing');
-            }
-          });
+          // Always try to capture from stream_sink.monitor
+          // The loopback should route audio there even if browser doesn't create sink input directly
+          const audioSource = audioDevice || 'stream_sink.monitor';
+          console.log(`Capturing audio from: ${audioSource}`);
           
           inputOptions.push(
             '-f', 'pulse',
@@ -1016,8 +994,6 @@ class WebStreamer {
             '-ar', '44100',
             '-i', audioSource
           );
-          // Note: This requires PulseAudio to be running and stream_sink to exist
-          // If it fails, FFmpeg will show an error but continue with video only
         } else {
           // Try to use pulse audio if available
           inputOptions.push(
