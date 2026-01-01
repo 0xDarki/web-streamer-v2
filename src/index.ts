@@ -774,13 +774,31 @@ class WebStreamer {
 
       // Wait for PulseAudio to be ready, then create a virtual sink
       let attempts = 0;
-      const maxAttempts = 10;
+      const maxAttempts = 20; // Increased to 20 attempts (10 seconds total)
       
       const checkPulse = () => {
         attempts++;
         try {
+          // Check if PulseAudio is running
           execSync('pulseaudio --check', { stdio: 'ignore' });
-          console.log('✓ PulseAudio is running and accessible');
+          
+          // Also check if the socket exists (more reliable)
+          const socketPath = process.env.PULSE_RUNTIME_PATH ? 
+            `${process.env.PULSE_RUNTIME_PATH}/native` : 
+            '/tmp/pulse/native';
+          try {
+            execSync(`test -S ${socketPath}`, { stdio: 'ignore' });
+            console.log('✓ PulseAudio is running and accessible (socket found)');
+          } catch (socketError) {
+            // Socket not found, but PulseAudio might still be starting
+            if (attempts < maxAttempts) {
+              console.log(`PulseAudio socket not ready yet (attempt ${attempts}/${maxAttempts})...`);
+              setTimeout(checkPulse, 500);
+              return;
+            } else {
+              console.log('✓ PulseAudio is running (socket check failed but --check passed)');
+            }
+          }
           
           // Create virtual sink
           console.log('Creating virtual sink...');
@@ -836,10 +854,52 @@ class WebStreamer {
           });
         } catch (e) {
           if (attempts < maxAttempts) {
+            // Try to get more info about why it's failing
+            try {
+              const checkOutput = execSync('pulseaudio --check -v 2>&1 || true', { encoding: 'utf8' });
+              if (checkOutput && checkOutput.trim()) {
+                console.log(`PulseAudio check output: ${checkOutput.trim()}`);
+              }
+            } catch (e2) {
+              // Ignore
+            }
+            
+            // Also check if socket exists
+            const socketPaths = [
+              process.env.PULSE_RUNTIME_PATH ? `${process.env.PULSE_RUNTIME_PATH}/native` : null,
+              '/tmp/pulse/native',
+              process.env.HOME ? `${process.env.HOME}/.config/pulse/native` : null,
+              '/run/user/' + (process.getuid ? process.getuid() : '1000') + '/pulse/native'
+            ].filter(p => p !== null);
+            
+            let socketFound = false;
+            for (const socketPath of socketPaths) {
+              try {
+                execSync(`test -S "${socketPath}"`, { stdio: 'ignore' });
+                console.log(`✓ Found PulseAudio socket at ${socketPath}`);
+                socketFound = true;
+                break;
+              } catch (e3) {
+                // Socket not found at this path
+              }
+            }
+            
+            if (socketFound) {
+              // Socket exists, PulseAudio should be ready
+              console.log('✓ PulseAudio socket found, assuming PulseAudio is ready');
+              // Continue with sink creation
+              setTimeout(() => {
+                checkPulse();
+              }, 100);
+              return;
+            }
+            
             console.log(`Waiting for PulseAudio to be ready (attempt ${attempts}/${maxAttempts})...`);
             setTimeout(checkPulse, 500);
           } else {
             console.error('✗ PulseAudio failed to start after multiple attempts');
+            // Try to continue anyway - maybe PulseAudio is running but --check doesn't work
+            console.log('Attempting to continue anyway - PulseAudio may be running...');
             resolve(); // Continue anyway
           }
         }
