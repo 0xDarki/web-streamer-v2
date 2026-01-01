@@ -153,6 +153,21 @@ class WebStreamer {
 
     // When using virtual display, we need headless: false so browser renders to X display
     // FFmpeg will capture from the virtual display
+    // Configure PulseAudio environment for browser to use stream_sink
+    if (useVirtualDisplay && process.platform === 'linux') {
+      // Set PulseAudio environment variables so browser uses stream_sink
+      process.env.PULSE_RUNTIME_PATH = process.env.HOME ? `${process.env.HOME}/.config/pulse` : '/tmp/pulse';
+      process.env.PULSE_STATE_PATH = process.env.HOME ? `${process.env.HOME}/.config/pulse` : '/tmp/pulse';
+      
+      // Create pulse directory if it doesn't exist
+      const { execSync } = require('child_process');
+      try {
+        execSync('mkdir -p /tmp/pulse 2>/dev/null || true');
+      } catch (e) {
+        // Ignore errors
+      }
+    }
+
     // Use app mode to hide browser UI - launch with URL directly
     this.browser = await puppeteer.launch({
       headless: false,
@@ -203,6 +218,38 @@ class WebStreamer {
     // Perform click action if specified (to enable audio playback)
     if (clickSelector || (clickX !== undefined && clickY !== undefined)) {
       await this.performClick(clickSelector, clickX, clickY, clickDelay);
+    }
+
+    // After click, move browser audio to stream_sink using pactl
+    if (useVirtualDisplay && process.platform === 'linux') {
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait for audio to start
+      
+      // Find Chrome/Chromium process and move its audio to stream_sink
+      const { exec } = require('child_process');
+      
+      // Try multiple methods to move audio to stream_sink
+      const moveAudio = () => {
+        // Method 1: Find by process name
+        exec('pactl list sink-inputs | grep -B2 "Chromium\\|chrome\\|Google Chrome" | grep "Sink Input" | cut -d# -f2 | head -1 | xargs -I {} pactl move-sink-input {} stream_sink 2>/dev/null', (error: any) => {
+          if (!error) {
+            console.log('Browser audio moved to stream_sink (method 1)');
+          } else {
+            // Method 2: Move all sink inputs to stream_sink
+            exec('pactl list short sink-inputs | cut -f1 | xargs -I {} pactl move-sink-input {} stream_sink 2>/dev/null', (error2: any) => {
+              if (!error2) {
+                console.log('All audio moved to stream_sink (method 2)');
+              } else {
+                console.warn('Could not move audio to stream_sink, audio may not be captured');
+              }
+            });
+          }
+        });
+      };
+      
+      // Try immediately and after a delay
+      moveAudio();
+      setTimeout(moveAudio, 2000);
+      setTimeout(moveAudio, 5000);
     }
 
     // Additional wait to ensure page is fully rendered before capturing
@@ -302,13 +349,30 @@ class WebStreamer {
         
         // Create a null sink (virtual audio device) that we can monitor
         const { exec } = require('child_process');
-        exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', (error: any) => {
-          if (error) {
-            console.warn('Could not create virtual sink, audio capture may not work');
-          } else {
-            console.log('Virtual sink created successfully');
-          }
-          resolve();
+        
+        // First, unload any existing sink with the same name
+        exec('pactl unload-module module-null-sink 2>/dev/null || true', () => {
+          // Create a null sink (virtual audio device) that we can monitor
+          exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', (error: any, stdout: any, stderr: any) => {
+            if (error) {
+              console.warn('Could not create virtual sink, audio capture may not work');
+              console.warn(`Error: ${stderr}`);
+              resolve(); // Continue anyway
+            } else {
+              const moduleId = stdout?.toString().trim();
+              console.log(`Virtual sink created successfully (module ID: ${moduleId})`);
+              
+              // Set stream_sink as default sink for new applications
+              exec('pactl set-default-sink stream_sink', (setError: any) => {
+                if (setError) {
+                  console.warn('Could not set stream_sink as default, but sink exists');
+                } else {
+                  console.log('stream_sink set as default sink');
+                }
+                resolve();
+              });
+            }
+          });
         });
       }, 2000);
     });
