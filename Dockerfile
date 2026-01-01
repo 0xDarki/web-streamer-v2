@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y \
     libu2f-udev \
     libvulkan1 \
     xvfb \
+    xdotool \
     ffmpeg \
     pulseaudio \
     && rm -rf /var/lib/apt/lists/*

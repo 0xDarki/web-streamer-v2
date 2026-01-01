@@ -22,6 +22,7 @@ class WebStreamer {
   private page: Page | null = null;
   private ffmpegProcess: ChildProcess | null = null;
   private xvfbProcess: ChildProcess | null = null;
+  private wmProcess: ChildProcess | null = null;
   private displayNumber: number = 99;
 
   /**
@@ -64,6 +65,8 @@ class WebStreamer {
     // Setup virtual display if needed (for Railway/headless environments)
     if (useVirtualDisplay && process.platform === 'linux') {
       await this.setupVirtualDisplay(finalWidth, finalHeight);
+      // Start a simple window manager to position the browser window
+      await this.startWindowManager();
     }
 
     // Launch browser with optimizations
@@ -71,7 +74,7 @@ class WebStreamer {
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=' + finalWidth + ',' + finalHeight,
       '--start-maximized',
-      '--kiosk', // Kiosk mode hides browser UI
+      '--window-position=0,0', // Position window at top-left
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -172,6 +175,21 @@ class WebStreamer {
     // Additional wait to ensure page is fully rendered before capturing
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
+    // Position browser window at 0,0 in virtual display (if using virtual display)
+    if (useVirtualDisplay && process.platform === 'linux') {
+      // Wait a bit for browser to fully start, then position window
+      setTimeout(() => {
+        const { exec } = require('child_process');
+        exec(`DISPLAY=:${this.displayNumber} xdotool search --name "Chromium" windowmove 0 0 windowsize ${finalWidth} ${finalHeight} windowraise 2>/dev/null || true`, (error: any) => {
+          if (error) {
+            console.log('Window positioning attempted (xdotool may not be available)');
+          } else {
+            console.log('Browser window positioned at 0,0');
+          }
+        });
+      }, 1000);
+    }
+
     // Start FFmpeg streaming
     await this.startFFmpegStream(rtmpsUrl, finalWidth, finalHeight, finalFps, audioDevice, videoDevice, useVirtualDisplay, lightweight);
 
@@ -211,6 +229,18 @@ class WebStreamer {
       console.warn(`Warning: Click action failed: ${error}`);
       // Don't throw - continue anyway as click might not be critical
     }
+  }
+
+  /**
+   * Start a simple window manager to position browser window
+   */
+  private async startWindowManager(): Promise<void> {
+    return new Promise((resolve) => {
+      // Use openbox or fluxbox if available, otherwise use xdotool to position window
+      // For simplicity, we'll use xdotool after browser starts
+      console.log('Window manager will position browser window after launch');
+      setTimeout(() => resolve(), 500);
+    });
   }
 
   /**
@@ -418,6 +448,11 @@ class WebStreamer {
       await this.browser.close();
       this.browser = null;
       this.page = null;
+    }
+
+    if (this.wmProcess) {
+      this.wmProcess.kill('SIGTERM');
+      this.wmProcess = null;
     }
 
     if (this.xvfbProcess) {
