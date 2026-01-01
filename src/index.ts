@@ -1384,17 +1384,47 @@ class WebStreamer {
             console.warn('Could not setup audio routing:', e);
           }
           
-          // Always try to capture from stream_sink.monitor
-          // The loopback should route audio there even if browser doesn't create sink input directly
-          const audioSource = audioDevice || 'stream_sink.monitor';
-          console.log(`Capturing audio from: ${audioSource}`);
+          // Try to use PulseAudio first, but fallback to ALSA if PulseAudio is not accessible
+          let usePulseAudio = false;
+          try {
+            const pulseEnv = this.getPulseEnv();
+            execSync('pactl info > /dev/null 2>&1', { 
+              env: pulseEnv,
+              stdio: 'ignore' 
+            });
+            // Check if stream_sink.monitor exists
+            try {
+              execSync('pactl list sources | grep -q "stream_sink.monitor"', { 
+                env: pulseEnv,
+                stdio: 'ignore' 
+              });
+              usePulseAudio = true;
+            } catch (e) {
+              console.warn('stream_sink.monitor not found, will use ALSA instead');
+            }
+          } catch (e) {
+            console.warn('PulseAudio not accessible, will use ALSA instead');
+          }
           
-          inputOptions.push(
-            '-f', 'pulse',
-            '-ac', '2',
-            '-ar', '44100',
-            '-i', audioSource
-          );
+          if (usePulseAudio) {
+            const audioSource = audioDevice || 'stream_sink.monitor';
+            console.log(`Capturing audio from PulseAudio: ${audioSource}`);
+            inputOptions.push(
+              '-f', 'pulse',
+              '-ac', '2',
+              '-ar', '44100',
+              '-i', audioSource
+            );
+          } else {
+            // Use ALSA directly - this works even without PulseAudio
+            console.log('Capturing audio from ALSA: hw:0,0');
+            inputOptions.push(
+              '-f', 'alsa',
+              '-ac', '2',
+              '-ar', '44100',
+              '-i', 'hw:0,0',
+            );
+          }
         } else {
           // Try to use pulse audio if available
           inputOptions.push(
