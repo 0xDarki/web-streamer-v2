@@ -231,56 +231,55 @@ class WebStreamer {
       // Wait for audio to appear in stream_sink (it should be there automatically since it's default)
       await new Promise<void>((resolve) => {
         let attempts = 0;
-        const maxAttempts = 15; // More attempts, longer wait
+        const maxAttempts = 10; // Reduced to 10 attempts (20 seconds total)
         
         const checkAudio = () => {
           attempts++;
+          console.log(`Checking for audio (attempt ${attempts}/${maxAttempts})...`);
           
-          // Check if there are any sink inputs in stream_sink
-          exec('pactl list sink-inputs | grep -A10 "Sink:" | grep -A10 "stream_sink" | grep "Sink Input"', (error: any, stdout: any) => {
-            if (!error && stdout && stdout.trim()) {
-              const sinkInputId = stdout.match(/Sink Input #(\d+)/)?.[1];
-              if (sinkInputId) {
-                console.log(`Audio found in stream_sink (sink-input: ${sinkInputId})`);
+          // First, check if there are any sink inputs at all
+          exec('pactl list short sink-inputs', (error2: any, stdout2: any) => {
+            if (!error2 && stdout2 && stdout2.trim()) {
+              const lines = stdout2.trim().split('\n');
+              console.log(`Found ${lines.length} sink input(s) in PulseAudio`);
+              
+              // Check each sink input to see where it's going
+              lines.forEach((line: string) => {
+                const parts = line.split('\t');
+                const inputId = parts[0];
+                const sinkName = parts[1] || 'unknown';
+                console.log(`  Sink input ${inputId} -> ${sinkName}`);
+                
+                // If it's not in stream_sink, move it
+                if (!sinkName.includes('stream_sink')) {
+                  exec(`pactl move-sink-input ${inputId} stream_sink`, (moveError: any) => {
+                    if (!moveError) {
+                      console.log(`  Moved sink input ${inputId} to stream_sink`);
+                    }
+                  });
+                } else {
+                  console.log(`  Sink input ${inputId} already in stream_sink`);
+                }
+              });
+              
+              // If we found any sink inputs, we're good (they're being moved to stream_sink)
+              if (lines.length > 0) {
+                console.log('Audio detected, continuing with stream...');
                 resolve();
                 return;
               }
             }
             
-            // Also check if there are any sink inputs at all (they should go to default sink)
-            exec('pactl list short sink-inputs', (error2: any, stdout2: any) => {
-              if (!error2 && stdout2 && stdout2.trim()) {
-                const inputIds = stdout2.trim().split('\n').filter((id: string) => id);
-                if (inputIds.length > 0) {
-                  // Move the first one to stream_sink (in case default didn't work)
-                  const firstId = inputIds[0].split('\t')[0];
-                  exec(`pactl move-sink-input ${firstId} stream_sink`, (moveError: any) => {
-                    if (!moveError) {
-                      console.log(`Audio moved to stream_sink (sink-input: ${firstId})`);
-                      resolve();
-                    } else if (attempts < maxAttempts) {
-                      setTimeout(checkAudio, 2000);
-                    } else {
-                      console.warn('Could not move audio to stream_sink after multiple attempts');
-                      console.warn('Audio may still work if stream_sink is the default sink');
-                      resolve();
-                    }
-                  });
-                } else if (attempts < maxAttempts) {
-                  // No sink inputs yet, wait longer
-                  setTimeout(checkAudio, 2000);
-                } else {
-                  console.warn('No audio sink inputs found after multiple attempts');
-                  console.warn('Audio may not be playing or browser may not have started audio yet');
-                  resolve();
-                }
-              } else if (attempts < maxAttempts) {
-                setTimeout(checkAudio, 2000);
-              } else {
-                console.warn('No audio sink inputs found');
-                resolve();
-              }
-            });
+            // No sink inputs found yet
+            if (attempts < maxAttempts) {
+              console.log(`No audio yet, waiting 2 seconds... (${attempts}/${maxAttempts})`);
+              setTimeout(checkAudio, 2000);
+            } else {
+              console.warn('No audio sink inputs found after multiple attempts');
+              console.warn('Continuing anyway - audio may start later or may not be playing');
+              console.warn('FFmpeg will try to capture from stream_sink.monitor');
+              resolve();
+            }
           });
         };
         
@@ -288,6 +287,7 @@ class WebStreamer {
       });
       
       // Additional wait to ensure audio is playing
+      console.log('Final wait before starting FFmpeg...');
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
 
@@ -653,33 +653,74 @@ class WebStreamer {
           
           // Verify sink and monitor exist before trying to capture
           const { execSync, exec } = require('child_process');
+          
+          // Check if sink exists
           try {
             execSync('pactl list sinks | grep -q "stream_sink"', { stdio: 'ignore' });
-            console.log('stream_sink exists');
-            
-            // Check if monitor exists and get its exact name
-            const monitorCheck = execSync('pactl list sources short | grep "stream_sink.monitor"', { encoding: 'utf8' }).trim();
+            console.log('✓ stream_sink exists');
+          } catch (e) {
+            console.error('✗ stream_sink not found!');
+            console.warn('Audio capture will likely fail');
+          }
+          
+          // Check if monitor exists - try multiple methods
+          let monitorFound = false;
+          try {
+            // Method 1: Check in sources short list
+            const monitorCheck = execSync('pactl list sources short 2>/dev/null | grep "stream_sink.monitor"', { encoding: 'utf8' }).trim();
             if (monitorCheck) {
               const monitorName = monitorCheck.split(/\s+/)[1] || 'stream_sink.monitor';
-              console.log(`Monitor found: ${monitorName}`);
-              console.log('Capturing audio from stream_sink.monitor');
-            } else {
-              console.warn('Monitor stream_sink.monitor not found in sources list');
+              console.log(`✓ Monitor found: ${monitorName}`);
+              monitorFound = true;
             }
-            
-            // Also verify there's audio in the sink
-            exec('pactl list sink-inputs | grep -A10 "Sink:" | grep -A10 "stream_sink" | head -5', (error: any, stdout: any) => {
-              if (!error && stdout && stdout.trim()) {
-                console.log('Audio found in stream_sink:');
-                console.log(stdout.trim().split('\n').slice(0, 3).join('\n'));
-              } else {
-                console.warn('No audio found in stream_sink yet - audio may not be playing');
-              }
-            });
           } catch (e) {
-            console.warn('stream_sink or monitor not found, audio may not be captured');
-            console.warn('FFmpeg will try to capture anyway, but may fail');
+            // Method 2: Check in full sources list
+            try {
+              execSync('pactl list sources | grep -q "stream_sink.monitor"', { stdio: 'ignore' });
+              console.log('✓ Monitor stream_sink.monitor exists (verified via full list)');
+              monitorFound = true;
+            } catch (e2) {
+              console.warn('✗ Monitor stream_sink.monitor not found');
+              console.warn('This may be a PulseAudio configuration issue');
+            }
           }
+          
+          if (!monitorFound) {
+            console.warn('Monitor not found - trying to list all sources for debugging:');
+            try {
+              const allSources = execSync('pactl list sources short 2>/dev/null', { encoding: 'utf8' });
+              console.log('Available sources:');
+              console.log(allSources);
+            } catch (e) {
+              console.warn('Could not list sources');
+            }
+          }
+          
+          // Check for audio in sink
+          exec('pactl list sink-inputs 2>/dev/null', (error: any, stdout: any) => {
+            if (!error && stdout && stdout.trim()) {
+              const hasStreamSink = stdout.includes('stream_sink');
+              if (hasStreamSink) {
+                console.log('✓ Audio found in stream_sink');
+                // Show details
+                const sinkInputSection = stdout.split('Sink Input #').find((section: string) => section.includes('stream_sink'));
+                if (sinkInputSection) {
+                  const lines = sinkInputSection.split('\n').slice(0, 5);
+                  console.log('Audio details:');
+                  lines.forEach((line: string) => console.log(`  ${line.trim()}`));
+                }
+              } else {
+                console.warn('No audio in stream_sink yet');
+                if (stdout.includes('Sink Input')) {
+                  console.log('But there are sink inputs elsewhere:');
+                  const inputCount = (stdout.match(/Sink Input #/g) || []).length;
+                  console.log(`  Found ${inputCount} sink input(s) in other sinks`);
+                }
+              }
+            } else {
+              console.warn('No sink inputs found at all - audio may not be playing');
+            }
+          });
           
           inputOptions.push(
             '-f', 'pulse',
