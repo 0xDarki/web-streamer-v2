@@ -180,9 +180,10 @@ class WebStreamer {
     // Pass PulseAudio environment to browser process
     const browserEnv = { ...process.env };
     if (useVirtualDisplay && process.platform === 'linux') {
+      const pulseEnv = this.getPulseEnv();
       browserEnv.PULSE_SINK = 'stream_sink';
-      browserEnv.PULSE_RUNTIME_PATH = process.env.PULSE_RUNTIME_PATH || '/tmp/pulse';
-      browserEnv.PULSE_STATE_PATH = process.env.PULSE_STATE_PATH || '/tmp/pulse';
+      browserEnv.PULSE_RUNTIME_PATH = pulseEnv.PULSE_RUNTIME_PATH;
+      browserEnv.PULSE_STATE_PATH = pulseEnv.PULSE_STATE_PATH;
     }
     
     this.browser = await puppeteer.launch({
@@ -272,7 +273,9 @@ class WebStreamer {
           console.log(`Checking for audio (attempt ${attempts}/${maxAttempts})...`);
           
           // First, check if there are any sink inputs at all
-          exec('pactl list short sink-inputs', (error2: any, stdout2: any) => {
+          exec('pactl list short sink-inputs', { 
+            env: this.getPulseEnv() 
+          }, (error2: any, stdout2: any) => {
             if (!error2 && stdout2 && stdout2.trim()) {
               const lines = stdout2.trim().split('\n');
               console.log(`Found ${lines.length} sink input(s) in PulseAudio`);
@@ -287,7 +290,9 @@ class WebStreamer {
                 
                 // If it's not in stream_sink, move it
                 if (!sinkName.includes('stream_sink')) {
-                  exec(`pactl move-sink-input ${inputId} stream_sink`, (moveError: any) => {
+                  exec(`pactl move-sink-input ${inputId} stream_sink`, { 
+                    env: this.getPulseEnv() 
+                  }, (moveError: any) => {
                     if (!moveError) {
                       console.log(`  ✓ Moved sink input ${inputId} to stream_sink`);
                       movedAny = true;
@@ -305,7 +310,9 @@ class WebStreamer {
               if (lines.length > 0) {
                 setTimeout(() => {
                   // Verify they're actually in stream_sink now
-                  exec('pactl list sink-inputs | grep -A5 "Sink:" | grep -A5 "stream_sink" | grep "Sink Input"', (verifyError: any, verifyStdout: any) => {
+                  exec('pactl list sink-inputs | grep -A5 "Sink:" | grep -A5 "stream_sink" | grep "Sink Input"', { 
+                    env: this.getPulseEnv() 
+                  }, (verifyError: any, verifyStdout: any) => {
                     if (!verifyError && verifyStdout && verifyStdout.trim()) {
                       console.log('✓ Audio confirmed in stream_sink, ready for FFmpeg');
                       resolve();
@@ -370,15 +377,26 @@ class WebStreamer {
     if (useVirtualDisplay && process.platform === 'linux') {
       const { execSync } = require('child_process');
       
+      const pulseEnv = this.getPulseEnv();
+      
       // First, ensure PulseAudio is running
       try {
-        execSync('pactl info > /dev/null 2>&1', { stdio: 'ignore' });
+        execSync('pactl info > /dev/null 2>&1', { 
+          env: pulseEnv,
+          stdio: 'ignore' 
+        });
         console.log('✓ PulseAudio is running');
       } catch (e) {
         console.warn('✗ PulseAudio not responding! Restarting...');
         try {
-          execSync('pulseaudio --kill 2>/dev/null || true', { stdio: 'ignore' });
-          execSync('pulseaudio --start --exit-idle-time=-1 --system=false --disallow-exit 2>/dev/null &', { stdio: 'ignore' });
+          execSync('pulseaudio --kill 2>/dev/null || true', { 
+            env: pulseEnv,
+            stdio: 'ignore' 
+          });
+          execSync('pulseaudio --start --exit-idle-time=-1 --system=false --disallow-exit 2>/dev/null &', { 
+            env: pulseEnv,
+            stdio: 'ignore' 
+          });
           await new Promise((resolve) => setTimeout(resolve, 2000));
           console.log('✓ PulseAudio restarted');
         } catch (e2) {
@@ -388,14 +406,23 @@ class WebStreamer {
       
       // Check if sink still exists
       try {
-        execSync('pactl list sinks | grep -q "stream_sink"', { stdio: 'ignore' });
+        execSync('pactl list sinks | grep -q "stream_sink"', { 
+          env: pulseEnv,
+          stdio: 'ignore' 
+        });
         console.log('✓ stream_sink still exists before FFmpeg start');
       } catch (e) {
         console.warn('✗ stream_sink not found! Recreating...');
         // Recreate the sink
         try {
-          execSync('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', { stdio: 'ignore' });
-          execSync('pactl set-default-sink stream_sink', { stdio: 'ignore' });
+          execSync('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', { 
+            env: pulseEnv,
+            stdio: 'ignore' 
+          });
+          execSync('pactl set-default-sink stream_sink', { 
+            env: pulseEnv,
+            stdio: 'ignore' 
+          });
           console.log('✓ stream_sink recreated');
           
           // Wait a moment for monitor to be created
@@ -403,7 +430,10 @@ class WebStreamer {
           
           // Verify monitor exists
           try {
-            execSync('pactl list sources | grep -q "stream_sink.monitor"', { stdio: 'ignore' });
+            execSync('pactl list sources | grep -q "stream_sink.monitor"', { 
+              env: pulseEnv,
+              stdio: 'ignore' 
+            });
             console.log('✓ Monitor stream_sink.monitor confirmed');
           } catch (e3) {
             console.warn('✗ Monitor still not found after recreation');
@@ -655,6 +685,15 @@ class WebStreamer {
   /**
    * Start PulseAudio for audio capture
    */
+  // Helper function to get PulseAudio environment variables
+  private getPulseEnv(): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
+      PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
+    };
+  }
+
   private async startPulseAudio(): Promise<void> {
     return new Promise((resolve) => {
       console.log('Starting PulseAudio for audio capture...');
@@ -690,11 +729,7 @@ class WebStreamer {
         }
         
         // Start PulseAudio as a daemon
-        const pulseEnv = {
-          ...process.env,
-          PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
-          PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
-        };
+        const pulseEnv = this.getPulseEnv();
         
         // Create pulse directory if it doesn't exist
         try {
@@ -774,39 +809,90 @@ class WebStreamer {
 
       // Wait for PulseAudio to be ready, then create a virtual sink
       let attempts = 0;
-      const maxAttempts = 20; // Increased to 20 attempts (10 seconds total)
+      const maxAttempts = 30; // Increased to 30 attempts (15 seconds total)
       
       const checkPulse = () => {
         attempts++;
+        const pulseEnv = {
+          ...process.env,
+          PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
+          PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
+        };
+        
         try {
-          // Check if PulseAudio is running
-          execSync('pulseaudio --check', { stdio: 'ignore' });
+          // First check if PulseAudio is running
+          execSync('pulseaudio --check', { 
+            env: pulseEnv,
+            stdio: 'ignore' 
+          });
           
           // Also check if the socket exists (more reliable)
-          const socketPath = process.env.PULSE_RUNTIME_PATH ? 
-            `${process.env.PULSE_RUNTIME_PATH}/native` : 
-            '/tmp/pulse/native';
+          const socketPath = pulseEnv.PULSE_RUNTIME_PATH + '/native';
+          let socketFound = false;
           try {
-            execSync(`test -S ${socketPath}`, { stdio: 'ignore' });
-            console.log('✓ PulseAudio is running and accessible (socket found)');
+            execSync(`test -S "${socketPath}"`, { stdio: 'ignore' });
+            socketFound = true;
+            console.log(`✓ PulseAudio socket found at ${socketPath}`);
           } catch (socketError) {
-            // Socket not found, but PulseAudio might still be starting
+            // Socket not found, try alternative locations
+            const altPaths = [
+              '/tmp/pulse/native',
+              process.env.HOME ? `${process.env.HOME}/.config/pulse/native` : null,
+            ].filter(p => p !== null);
+            
+            for (const altPath of altPaths) {
+              try {
+                execSync(`test -S "${altPath}"`, { stdio: 'ignore' });
+                console.log(`✓ PulseAudio socket found at ${altPath}`);
+                socketFound = true;
+                break;
+              } catch (e) {
+                // Not found at this path
+              }
+            }
+          }
+          
+          // Try to use pactl to verify PulseAudio is accessible
+          try {
+            const pactlInfo = execSync('pactl info', { 
+              env: pulseEnv,
+              encoding: 'utf8',
+              stdio: 'pipe'
+            });
+            if (pactlInfo && pactlInfo.includes('Server String')) {
+              console.log('✓ PulseAudio is accessible via pactl');
+            } else {
+              throw new Error('pactl info did not return expected output');
+            }
+          } catch (pactlError) {
             if (attempts < maxAttempts) {
-              console.log(`PulseAudio socket not ready yet (attempt ${attempts}/${maxAttempts})...`);
+              console.log(`PulseAudio not accessible via pactl yet (attempt ${attempts}/${maxAttempts})...`);
               setTimeout(checkPulse, 500);
               return;
             } else {
-              console.log('✓ PulseAudio is running (socket check failed but --check passed)');
+              console.warn('⚠ PulseAudio is running but pactl is not accessible');
             }
           }
+          
+          if (!socketFound && attempts < maxAttempts) {
+            console.log(`PulseAudio socket not ready yet (attempt ${attempts}/${maxAttempts})...`);
+            setTimeout(checkPulse, 500);
+            return;
+          }
+          
+          console.log('✓ PulseAudio is running and accessible');
           
           // Create virtual sink
           console.log('Creating virtual sink...');
           
           // First, unload any existing sink with the same name
-          exec('pactl unload-module module-null-sink 2>/dev/null || true', () => {
+          exec('pactl unload-module module-null-sink 2>/dev/null || true', { 
+            env: pulseEnv 
+          }, () => {
             // Create a null sink (virtual audio device) that we can monitor
-            exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', (error: any, stdout: any, stderr: any) => {
+            exec('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', { 
+              env: pulseEnv 
+            }, (error: any, stdout: any, stderr: any) => {
               if (error) {
                 console.warn('Could not create virtual sink, audio capture may not work');
                 console.warn(`Error: ${stderr}`);
@@ -818,7 +904,9 @@ class WebStreamer {
                 // Wait a moment for the monitor to be created
                 setTimeout(() => {
                   // Verify monitor exists
-                  exec('pactl list sources | grep -q "stream_sink.monitor"', (monitorError: any) => {
+                  exec('pactl list sources | grep -q "stream_sink.monitor"', { 
+                    env: pulseEnv 
+                  }, (monitorError: any) => {
                     if (monitorError) {
                       console.warn('Monitor not found, but sink exists');
                     } else {
@@ -826,7 +914,9 @@ class WebStreamer {
                     }
                     
                     // Set stream_sink as default sink for new applications
-                    exec('pactl set-default-sink stream_sink', (setError: any) => {
+                    exec('pactl set-default-sink stream_sink', { 
+                      env: pulseEnv 
+                    }, (setError: any) => {
                       if (setError) {
                         console.warn('Could not set stream_sink as default, but sink exists');
                       } else {
@@ -836,7 +926,9 @@ class WebStreamer {
                       // Also create a loopback from default source to stream_sink
                       // This will route any audio going to the default sink to stream_sink
                       setTimeout(() => {
-                        exec('pactl load-module module-loopback source=@DEFAULT_SOURCE@ sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
+                        exec('pactl load-module module-loopback source=@DEFAULT_SOURCE@ sink=stream_sink latency_msec=1', { 
+                          env: pulseEnv 
+                        }, (loopbackError: any, loopbackStdout: any) => {
                           if (loopbackError) {
                             console.warn('Could not create loopback (may not be needed):', loopbackError.message);
                           } else {
@@ -1029,7 +1121,15 @@ class WebStreamer {
       const ffmpegArgs = [...inputOptions, ...outputOptions];
       console.log('Retrying FFmpeg with silent audio:', ffmpegArgs.join(' '));
 
-      this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+      // Pass PulseAudio environment variables to FFmpeg
+      const ffmpegEnv = {
+        ...process.env,
+        ...this.getPulseEnv(),
+      };
+      
+      this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+        env: ffmpegEnv
+      });
 
       if (this.ffmpegProcess.stdout) {
         this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
@@ -1136,14 +1236,22 @@ class WebStreamer {
           // Strategy: Since browser may not create sink input, we'll use module-null-sink differently
           // Create a loopback from all possible sources to stream_sink
           try {
+            const pulseEnv = this.getPulseEnv();
+            
             // Get all available sinks
-            const allSinks = execSync('pactl list sinks short | cut -f2', { encoding: 'utf8' }).trim().split('\n');
+            const allSinks = execSync('pactl list sinks short | cut -f2', { 
+              env: pulseEnv,
+              encoding: 'utf8' 
+            }).trim().split('\n');
             console.log(`Available sinks: ${allSinks.join(', ')}`);
             
             // Get default sink
             let defaultSink = 'auto_null';
             try {
-              defaultSink = execSync('pactl info | grep "Default Sink" | cut -d: -f2 | xargs', { encoding: 'utf8' }).trim();
+              defaultSink = execSync('pactl info | grep "Default Sink" | cut -d: -f2 | xargs', { 
+                env: pulseEnv,
+                encoding: 'utf8' 
+              }).trim();
               console.log(`Default sink: ${defaultSink}`);
             } catch (e) {
               console.warn('Could not get default sink, using auto_null');
@@ -1155,7 +1263,10 @@ class WebStreamer {
             
             // First, verify PulseAudio is running and accessible
             try {
-              execSync('pulseaudio --check', { stdio: 'ignore' });
+              execSync('pulseaudio --check', { 
+                env: pulseEnv,
+                stdio: 'ignore' 
+              });
               console.log('✓ PulseAudio is running');
             } catch (e) {
               console.error('✗ PulseAudio is not running! Cannot create ALSA source.');
@@ -1167,7 +1278,9 @@ class WebStreamer {
               try {
                 // First, try to create an ALSA source from the default ALSA device
                 // This will capture audio from ALSA and make it available in PulseAudio
-                exec('pactl load-module module-alsa-source device=hw:0,0 source_name=alsa_source', (alsaError: any, alsaStdout: any) => {
+                exec('pactl load-module module-alsa-source device=hw:0,0 source_name=alsa_source', { 
+                  env: pulseEnv 
+                }, (alsaError: any, alsaStdout: any) => {
                   if (!alsaError && alsaStdout) {
                     const alsaId = alsaStdout.toString().trim();
                     console.log(`✓ ALSA source created (module ID: ${alsaId}) - capturing from hw:0,0`);
@@ -1175,7 +1288,9 @@ class WebStreamer {
                     // Wait a moment for the source to be ready
                     setTimeout(() => {
                       // Route the ALSA source to stream_sink via loopback
-                      exec('pactl load-module module-loopback source=alsa_source sink=stream_sink latency_msec=1', (loopbackError: any, loopbackStdout: any) => {
+                      exec('pactl load-module module-loopback source=alsa_source sink=stream_sink latency_msec=1', { 
+                        env: pulseEnv 
+                      }, (loopbackError: any, loopbackStdout: any) => {
                         if (!loopbackError && loopbackStdout) {
                           const loopbackId = loopbackStdout.toString().trim();
                           console.log(`✓ Loopback created (module ID: ${loopbackId}) - routing alsa_source to stream_sink`);
@@ -1190,14 +1305,19 @@ class WebStreamer {
                     
                     // Alternative: Try to create loopback from all available sources
                     try {
-                      const allSources = execSync('pactl list sources short 2>/dev/null | cut -f2', { encoding: 'utf8' }).trim().split('\n').filter((s: string) => s);
+                      const allSources = execSync('pactl list sources short 2>/dev/null | cut -f2', { 
+                        env: pulseEnv,
+                        encoding: 'utf8' 
+                      }).trim().split('\n').filter((s: string) => s);
                       if (allSources.length > 0) {
                         console.log(`Available sources: ${allSources.join(', ')}`);
                         
                         // Try to create loopback from each source to stream_sink
                         allSources.forEach((source: string) => {
                           if (source.includes('.monitor') && !source.includes('stream_sink')) {
-                            exec(`pactl load-module module-loopback source=${source} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                            exec(`pactl load-module module-loopback source=${source} sink=stream_sink latency_msec=1`, { 
+                              env: pulseEnv 
+                            }, (loopbackError: any, loopbackStdout: any) => {
                               if (!loopbackError && loopbackStdout) {
                                 const loopbackId = loopbackStdout.toString().trim();
                                 console.log(`Loopback created (module ID: ${loopbackId}) - routing ${source} to stream_sink`);
@@ -1208,9 +1328,14 @@ class WebStreamer {
                         
                         // Also try to create loopback from default source
                         try {
-                          const defaultSource = execSync('pactl info 2>/dev/null | grep "Default Source" | cut -d: -f2 | xargs', { encoding: 'utf8' }).trim();
+                          const defaultSource = execSync('pactl info 2>/dev/null | grep "Default Source" | cut -d: -f2 | xargs', { 
+                            env: pulseEnv,
+                            encoding: 'utf8' 
+                          }).trim();
                           if (defaultSource && !defaultSource.includes('stream_sink')) {
-                            exec(`pactl load-module module-loopback source=${defaultSource} sink=stream_sink latency_msec=1`, (loopbackError: any, loopbackStdout: any) => {
+                            exec(`pactl load-module module-loopback source=${defaultSource} sink=stream_sink latency_msec=1`, { 
+                              env: pulseEnv 
+                            }, (loopbackError: any, loopbackStdout: any) => {
                               if (!loopbackError && loopbackStdout) {
                                 const loopbackId = loopbackStdout.toString().trim();
                                 console.log(`Loopback from default source created (module ID: ${loopbackId}) - routing ${defaultSource} to stream_sink`);
@@ -1302,7 +1427,15 @@ class WebStreamer {
       console.log('Starting FFmpeg with args:', ffmpegArgs.join(' '));
 
       // Spawn FFmpeg process
-      this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+      // Pass PulseAudio environment variables to FFmpeg
+      const ffmpegEnv = {
+        ...process.env,
+        ...this.getPulseEnv(),
+      };
+      
+      this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+        env: ffmpegEnv
+      });
 
       if (this.ffmpegProcess.stdout) {
         this.ffmpegProcess.stdout.on('data', (data: Buffer) => {
