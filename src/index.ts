@@ -675,36 +675,101 @@ class WebStreamer {
         // Kill any existing PulseAudio processes
         try {
           execSync('pkill -9 pulseaudio 2>/dev/null || true', { stdio: 'ignore' });
+          // Wait a moment for processes to be killed
+          execSync('sleep 1', { stdio: 'ignore' });
+        } catch (e) {
+          // Ignore errors
+        }
+        
+        // Start PulseAudio daemon directly (not with --start which doesn't work in containers)
+        // Use --daemonize to run in background
+        try {
+          execSync('pulseaudio --kill 2>/dev/null || true', { stdio: 'ignore' });
+        } catch (e) {
+          // Ignore errors
+        }
+        
+        // Start PulseAudio as a daemon
+        const pulseEnv = {
+          ...process.env,
+          PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
+          PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
+        };
+        
+        // Create pulse directory if it doesn't exist
+        try {
+          execSync('mkdir -p /tmp/pulse 2>/dev/null || true', { stdio: 'ignore' });
         } catch (e) {
           // Ignore errors
         }
         
         // Start PulseAudio daemon
-        this.pulseAudioProcess = spawn('pulseaudio', [
-          '--start',
-          '--exit-idle-time=-1',
-          '--system=false',
-          '--disallow-exit',
-        ], {
-          env: {
-            ...process.env,
-            PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse',
-            PULSE_STATE_PATH: process.env.PULSE_STATE_PATH || '/tmp/pulse',
-          }
-        });
-        
-        // Capture PulseAudio output for debugging
-        this.pulseAudioProcess.stderr?.on('data', (data: Buffer) => {
-          const output = data.toString();
-          if (output.includes('error') || output.includes('Error') || output.includes('failed')) {
-            console.warn(`PulseAudio stderr: ${output}`);
-          }
-        });
+        // In containers, we need to use --daemonize without --start
+        try {
+          // Try using execSync with --daemonize first (works in containers)
+          execSync('pulseaudio --exit-idle-time=-1 --system=false --disallow-exit --daemonize', {
+            env: pulseEnv,
+            stdio: 'pipe',
+            timeout: 5000
+          });
+          console.log('✓ PulseAudio daemon started via execSync (--daemonize)');
+        } catch (e: any) {
+          // If --daemonize doesn't work, try with --start
+          console.log('pulseaudio --daemonize failed, trying --start...');
+          try {
+            execSync('pulseaudio --start --exit-idle-time=-1 --system=false --disallow-exit', {
+              env: pulseEnv,
+              stdio: 'pipe',
+              timeout: 5000
+            });
+            console.log('✓ PulseAudio daemon started via --start');
+          } catch (e2: any) {
+            // If that doesn't work, try starting as a background process
+            console.log('pulseaudio --start failed, trying spawn with daemonize...');
+          try {
+            // Use spawn to start PulseAudio in background
+            this.pulseAudioProcess = spawn('pulseaudio', [
+              '--exit-idle-time=-1',
+              '--system=false',
+              '--disallow-exit',
+              '--daemonize',
+            ], {
+              env: pulseEnv,
+              detached: false,
+              stdio: 'pipe'
+            });
+            
+            // Capture PulseAudio output for debugging
+            this.pulseAudioProcess.stdout?.on('data', (data: Buffer) => {
+              const output = data.toString();
+              console.log(`PulseAudio stdout: ${output}`);
+            });
+            
+            this.pulseAudioProcess.stderr?.on('data', (data: Buffer) => {
+              const output = data.toString();
+              if (output.includes('error') || output.includes('Error') || output.includes('failed')) {
+                console.warn(`PulseAudio stderr: ${output}`);
+              } else {
+                console.log(`PulseAudio stderr: ${output}`);
+              }
+            });
 
-        this.pulseAudioProcess.on('error', (error) => {
-          console.warn(`PulseAudio start warning: ${error.message}`);
-          // Continue anyway - audio might not be critical
-        });
+            this.pulseAudioProcess.on('error', (error) => {
+              console.error(`✗ PulseAudio spawn error: ${error.message}`);
+            });
+            
+            this.pulseAudioProcess.on('exit', (code) => {
+              if (code !== 0 && code !== null) {
+                console.warn(`PulseAudio process exited with code ${code}`);
+              } else {
+                console.log('✓ PulseAudio daemon started via spawn');
+              }
+            });
+          } catch (spawnError) {
+            console.error('✗ Failed to start PulseAudio:', spawnError);
+          }
+          }
+        }
       }
 
       // Wait for PulseAudio to be ready, then create a virtual sink
