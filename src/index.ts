@@ -23,6 +23,7 @@ class WebStreamer {
   private ffmpegProcess: ChildProcess | null = null;
   private xvfbProcess: ChildProcess | null = null;
   private wmProcess: ChildProcess | null = null;
+  private pulseAudioProcess: ChildProcess | null = null;
   private displayNumber: number = 99;
 
   /**
@@ -65,6 +66,8 @@ class WebStreamer {
     // Setup virtual display if needed (for Railway/headless environments)
     if (useVirtualDisplay && process.platform === 'linux') {
       await this.setupVirtualDisplay(finalWidth, finalHeight);
+      // Start PulseAudio for audio capture
+      await this.startPulseAudio();
       // Start a simple window manager to position the browser window
       await this.startWindowManager();
     }
@@ -105,7 +108,7 @@ class WebStreamer {
       '--hide-scrollbars',
       '--ignore-gpu-blacklist',
       '--metrics-recording-only',
-      '--mute-audio',
+      // '--mute-audio', // Don't mute - we want to capture audio
       '--no-first-run',
       '--no-pings',
       '--no-zygote',
@@ -232,6 +235,33 @@ class WebStreamer {
   }
 
   /**
+   * Start PulseAudio for audio capture
+   */
+  private async startPulseAudio(): Promise<void> {
+    return new Promise((resolve) => {
+      console.log('Starting PulseAudio for audio capture...');
+      
+      // Start PulseAudio daemon
+      this.pulseAudioProcess = spawn('pulseaudio', [
+        '--start',
+        '--exit-idle-time=-1',
+        '--system=false',
+      ]);
+
+      this.pulseAudioProcess.on('error', (error) => {
+        console.warn(`PulseAudio start warning: ${error.message}`);
+        // Continue anyway - audio might not be critical
+      });
+
+      // Wait a moment for PulseAudio to start
+      setTimeout(() => {
+        console.log('PulseAudio started (or already running)');
+        resolve();
+      }, 1000);
+    });
+  }
+
+  /**
    * Start a simple window manager to position browser window
    */
   private async startWindowManager(): Promise<void> {
@@ -330,13 +360,18 @@ class WebStreamer {
           '-i', videoInput,
         ];
 
-        // For Railway/headless: use anullsrc (silent audio) or pulse if available
+        // For Railway/headless: try to capture audio from PulseAudio
         if (useVirtualDisplay) {
-          // Use anullsrc to generate silent audio (since we can't capture system audio in Railway)
+          // Try to use PulseAudio to capture browser audio
+          // Use the monitor of the default sink to capture what's playing
           inputOptions.push(
-            '-f', 'lavfi',
-            '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100'
+            '-f', 'pulse',
+            '-ac', '2',
+            '-ar', '44100',
+            '-i', audioDevice || 'default.monitor'
           );
+          // Note: This requires PulseAudio to be running
+          // If it fails, FFmpeg will show an error but continue with video only
         } else {
           // Try to use pulse audio if available
           inputOptions.push(
@@ -453,6 +488,11 @@ class WebStreamer {
     if (this.wmProcess) {
       this.wmProcess.kill('SIGTERM');
       this.wmProcess = null;
+    }
+
+    if (this.pulseAudioProcess) {
+      this.pulseAudioProcess.kill('SIGTERM');
+      this.pulseAudioProcess = null;
     }
 
     if (this.xvfbProcess) {
