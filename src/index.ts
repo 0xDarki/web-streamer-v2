@@ -309,6 +309,54 @@ class WebStreamer {
       }, 1000);
     }
 
+    // Before starting FFmpeg, ensure PulseAudio is running and sink exists
+    if (useVirtualDisplay && process.platform === 'linux') {
+      const { execSync } = require('child_process');
+      
+      // First, ensure PulseAudio is running
+      try {
+        execSync('pactl info > /dev/null 2>&1', { stdio: 'ignore' });
+        console.log('✓ PulseAudio is running');
+      } catch (e) {
+        console.warn('✗ PulseAudio not responding! Restarting...');
+        try {
+          execSync('pulseaudio --kill 2>/dev/null || true', { stdio: 'ignore' });
+          execSync('pulseaudio --start --exit-idle-time=-1 --system=false --disallow-exit 2>/dev/null &', { stdio: 'ignore' });
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          console.log('✓ PulseAudio restarted');
+        } catch (e2) {
+          console.error('Failed to restart PulseAudio:', e2);
+        }
+      }
+      
+      // Check if sink still exists
+      try {
+        execSync('pactl list sinks | grep -q "stream_sink"', { stdio: 'ignore' });
+        console.log('✓ stream_sink still exists before FFmpeg start');
+      } catch (e) {
+        console.warn('✗ stream_sink not found! Recreating...');
+        // Recreate the sink
+        try {
+          execSync('pactl load-module module-null-sink sink_name=stream_sink sink_properties=device.description="StreamSink"', { stdio: 'ignore' });
+          execSync('pactl set-default-sink stream_sink', { stdio: 'ignore' });
+          console.log('✓ stream_sink recreated');
+          
+          // Wait a moment for monitor to be created
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          
+          // Verify monitor exists
+          try {
+            execSync('pactl list sources | grep -q "stream_sink.monitor"', { stdio: 'ignore' });
+            console.log('✓ Monitor stream_sink.monitor confirmed');
+          } catch (e3) {
+            console.warn('✗ Monitor still not found after recreation');
+          }
+        } catch (e2) {
+          console.error('Failed to recreate stream_sink:', e2);
+        }
+      }
+    }
+
     // Start FFmpeg streaming
     // Browser is at finalWidth x finalHeight, but stream can be at different resolution
     await this.startFFmpegStream(
